@@ -2,15 +2,29 @@
 
 #include <iostream>
 #include <assert.h>
+#include <algorithm>
+
 #include <thread>
+#include <mutex>
 
 using std::cout;
 using std::endl;
 
+#ifdef _WIN64
+    typedef unsigned long long PAGE_ID;
+#elif _WIN32
+    typedef size_t PAGE_ID;
+#elif __i686__
+    typedef size_t PAGE_ID;
+#elif __LP64__
+    typedef unsigned long long PAGE_ID;
+#endif
+
+
 static const int MAX_BYTES = 256 * 1024;
 static const int NFREELIST = 208;
 
-void *&NextObj(void *obj)
+static void *&NextObj(void *obj)
 {
     return *(void **)obj;
 }
@@ -19,7 +33,7 @@ class FreeList
 {
 private:
     void *_freeList = nullptr;
-
+    size_t _maxSize = 1;           // 用于慢启动调节
 public:
     void Push(void *obj)
     {
@@ -27,6 +41,12 @@ public:
         // 头插
         NextObj(obj) = _freeList;
         _freeList = obj;
+    }
+
+    void PushRange(void* start, void* end)
+    {
+        NextObj(end) = _freeList;
+        _freeList = start;
     }
 
     void *Pop()
@@ -41,6 +61,11 @@ public:
     bool Empty()
     {
         return _freeList == nullptr;
+    }
+
+    size_t& MaxSize()
+    {
+        return _maxSize;
     }
 };
 
@@ -154,4 +179,44 @@ public:
         }
         return -1;
     }
+
+    // 用于慢启动反馈调节
+    // size很大则少分配一些，size很小则多分配一些
+    static size_t NumMoveSize(size_t size)
+    {
+        assert(size > 0);
+
+        size_t num = MAX_BYTES / size;
+        if(size <= 2)
+            num = 2;
+        
+        if(size > 512)
+            num = 512;
+        
+        return num;
+    }
+};
+
+struct Span
+{
+    PAGE_ID _pageid = 0;    // 大块内存的起始页号
+    size_t n = 0;           // 页的数量
+
+    Span* _next = nullptr;  // 双向链表的前后指针
+    Span* _prev = nullptr;
+
+    size_t _useCount = 0;   // 切好的小块内存，被分配给threadcache的数量
+    
+    void* _freeList = nullptr; // 自由链表，管理切好的小块内存
+};
+
+// 带头的双向链表，也就是一个“桶”
+class SpanList
+{
+private:
+    Span* _head;        // 头节点
+public:
+    std::mutex _mtx;    // 桶锁
+public:
+
 };

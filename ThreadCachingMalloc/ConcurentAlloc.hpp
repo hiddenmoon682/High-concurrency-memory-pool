@@ -7,7 +7,7 @@
 static thread_local ThreadCache* pTLSThreadCache = nullptr;
 
 // 申请内存
-void* ConcurentAlloc(size_t size)
+static void* ConcurentAlloc(size_t size)
 {
     // 每个线程都有自己的pTLSthreadcache
     if(pTLSThreadCache == nullptr)
@@ -20,7 +20,7 @@ void* ConcurentAlloc(size_t size)
     return pTLSThreadCache->Allocate(size);
 }
 
-void ConcurentFree(void* ptr, size_t size)
+static void ConcurentFree(void* ptr, size_t size)
 {
     assert(pTLSThreadCache);
 
