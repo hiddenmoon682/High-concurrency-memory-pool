@@ -20,9 +20,32 @@ using std::endl;
     typedef unsigned long long PAGE_ID;
 #endif
 
+#if defined(_WIN32) || defined(_WIN64)
+	#include <windows.h>
+#elif defined(__i686__) || defined(__LP64__)
+    #include <sys/mman.h>
+#endif
 
-static const int MAX_BYTES = 256 * 1024;
-static const int NFREELIST = 208;
+
+static const size_t MAX_BYTES = 256 * 1024;
+static const size_t NFREELIST = 208;
+static const size_t NPAGES = 129;
+static const size_t PAGE_SHIFT = 13; // 8 * 1024 Byte = 8 KB = 2^13 Byte
+
+// 直接去堆上按页申请空间
+inline static void* SystemAlloc(size_t kpage)
+{
+#if defined(_WIN32) || defined(_WIN64)
+	void* ptr = VirtualAlloc(0, kpage << PAGE_SHIFT, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#elif defined(__i686__) || defined(__LP64__)
+    void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
+	if (ptr == nullptr)
+		throw std::bad_alloc();
+
+	return ptr;
+}
+
 
 static void *&NextObj(void *obj)
 {
@@ -195,12 +218,32 @@ public:
         
         return num;
     }
+
+	// 计算一次向系统获取几个页
+	// 单个对象 8byte
+	// ...
+	// 单个对象 256KB
+    // size 是内存块大小，返回值是页数
+	static size_t NumMovePage(size_t size)
+	{
+        // 计算一批内存块的数量*size得到总共的大小
+		size_t num = NumMoveSize(size);
+		size_t npage = num*size;
+        // 除以 8KB
+		npage >>= PAGE_SHIFT;
+		if (npage == 0)
+			npage = 1;
+
+		return npage;
+	}
+
 };
 
 struct Span
 {
-    PAGE_ID _pageid = 0;    // 大块内存的起始页号
-    size_t n = 0;           // 页的数量
+    // 需要注意的是，页号是直接根据系统给的实际的地址(虚拟地址)直接计算出来的，而不是从0开始的
+    PAGE_ID _pageId = 0;     // 大块内存的起始页号
+    size_t _n = 0;           // 页的数量
 
     Span* _next = nullptr;  // 双向链表的前后指针
     Span* _prev = nullptr;
@@ -218,5 +261,62 @@ private:
 public:
     std::mutex _mtx;    // 桶锁
 public:
+    SpanList()
+    {
+        _head = new Span;
+        _head->_next = _head;
+        _head->_prev = _head;
+    }
+
+    bool Empty()
+    {
+        return _head->_next == _head;
+    }
+
+    Span* Begin()
+    {
+        return _head->_next;
+    }
+
+    Span* End()
+    {
+        return _head;
+    }
+
+    void PushFront(Span* newspan)
+    {
+        Insert(Begin(), newspan);
+    }
+
+    Span* PopFront()
+    {
+        Span* front = Begin();
+        Erase(front);
+        return front;
+    }
+
+    void Insert(Span* pos, Span* newspan)
+    {
+        assert(pos);
+        assert(newspan);
+
+        Span* prev = pos->_prev;
+        newspan->_next = pos;
+        newspan->_prev = prev;
+        pos->_prev = newspan;
+        prev->_next = pos;
+    }
+
+    void Erase(Span* pos)
+    {
+        assert(pos);
+        assert(pos != _head);
+
+        Span* prev = pos->_prev;
+        Span* next = pos->_next;
+
+        next->_prev = prev;
+        prev->_next = next;
+    }
 
 };
