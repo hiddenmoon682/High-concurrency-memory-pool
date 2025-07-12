@@ -210,10 +210,10 @@ public:
         assert(size > 0);
 
         size_t num = MAX_BYTES / size;
-        if(size <= 2)
+        if(num <= 2)
             num = 2;
         
-        if(size > 512)
+        if(num > 512)
             num = 512;
         
         return num;
@@ -304,7 +304,7 @@ public:
         newspan->_next = pos;
         newspan->_prev = prev;
         pos->_prev = newspan;
-        prev->_next = pos;
+        prev->_next = newspan;
     }
 
     void Erase(Span* pos)

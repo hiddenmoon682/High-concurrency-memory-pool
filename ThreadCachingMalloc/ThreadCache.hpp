@@ -27,7 +27,7 @@ public:
         }
         else
         {
-            return FetchFromCentralCache(index, size);
+            return FetchFromCentralCache(index, alignSize);
         }
     }
     // 释放内存
@@ -53,8 +53,8 @@ public:
         }
         // batchNum最小为4
 
-        void* start;
-        void* end;
+        void* start = nullptr;
+        void* end = nullptr;
         size_t actualNum = CentralCache::GetInstance()->FetchRangeObj(start, end, batchNum, size);
         assert(actualNum > 0);
 
