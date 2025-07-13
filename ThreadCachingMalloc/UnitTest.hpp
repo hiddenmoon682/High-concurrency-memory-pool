@@ -4,19 +4,30 @@
 
 
 void Alloc1()
-{
-    for(size_t i = 0; i < 2025; ++i)
+{   
+    std::vector<void*> v(300);
+    for(size_t i = 0; i < 300; ++i)
     {
-        void* ptr = ConcurentAlloc(6);
         cout << i << endl;
+        v[i] = ConcurentAlloc(6);
+    }
+    for(size_t i = 0; i < 300; ++i)
+    {
+        ConcurentFree(v[i], 6);
     }
 }
 
 void Alloc2()
-{
-    for(size_t i = 0; i < 5; ++i)
+{   
+    std::vector<void*> v(300);
+    for(size_t i = 0; i < 300; ++i)
     {
-        void* ptr = ConcurentAlloc(7);
+        cout << i << endl;
+        v[i] = ConcurentAlloc(6);
+    }
+    for(size_t i = 0; i < 300; ++i)
+    {
+        ConcurentFree(v[i], 6);
     }
 }
 

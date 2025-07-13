@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include <unordered_map>
+#include <vector>
 
 #include <thread>
 #include <mutex>
@@ -40,8 +41,8 @@ inline static void* SystemAlloc(size_t kpage)
 #if defined(_WIN32) || defined(_WIN64)
 	void* ptr = VirtualAlloc(0, kpage << PAGE_SHIFT, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #elif defined(__i686__) || defined(__LP64__)
-    // void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    void* ptr = malloc(kpage << PAGE_SHIFT);
+    void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // void* ptr = malloc(kpage << PAGE_SHIFT);
 #endif
 	if (ptr == nullptr)
 		throw std::bad_alloc();
@@ -68,6 +69,7 @@ public:
         // 头插
         NextObj(obj) = _freeList;
         _freeList = obj;
+        ++_size;
     }
 
     void PushRange(void* start, void* end, size_t n)
@@ -99,6 +101,7 @@ public:
         // 头删
         void *obj = _freeList;
         _freeList = NextObj(obj);
+        --_size;
         return obj;
     }
 
@@ -194,7 +197,7 @@ public:
 
     static inline size_t _Index(size_t bytes, size_t align_shift)
     {
-        return ((bytes + (1 << align_shift) - 1) >> align_shift) - 1;
+        return ((bytes + ((size_t)1 << align_shift) - 1) >> align_shift) - 1;
     }
 
     static inline size_t Index(size_t bytes)

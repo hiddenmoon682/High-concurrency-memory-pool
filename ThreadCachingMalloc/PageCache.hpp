@@ -38,7 +38,7 @@ public:
         }
 
         // 对应位置没有span，再检查一下后面的桶里有没有span，如果有，就把他们进行切分
-        for(int i = k+1; i < NPAGES; ++i)
+        for(size_t i = k+1; i < NPAGES; ++i)
         {
             if(!_spanLists[i].Empty())
             {
