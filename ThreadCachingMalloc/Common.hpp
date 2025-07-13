@@ -4,6 +4,8 @@
 #include <assert.h>
 #include <algorithm>
 
+#include <unordered_map>
+
 #include <thread>
 #include <mutex>
 
@@ -38,7 +40,8 @@ inline static void* SystemAlloc(size_t kpage)
 #if defined(_WIN32) || defined(_WIN64)
 	void* ptr = VirtualAlloc(0, kpage << PAGE_SHIFT, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #elif defined(__i686__) || defined(__LP64__)
-    void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void* ptr = malloc(kpage << PAGE_SHIFT);
 #endif
 	if (ptr == nullptr)
 		throw std::bad_alloc();
@@ -57,6 +60,7 @@ class FreeList
 private:
     void *_freeList = nullptr;
     size_t _maxSize = 1;           // 用于慢启动调节
+    size_t _size = 0;              // 自由链表挂的内存块的数量
 public:
     void Push(void *obj)
     {
@@ -66,10 +70,27 @@ public:
         _freeList = obj;
     }
 
-    void PushRange(void* start, void* end)
+    void PushRange(void* start, void* end, size_t n)
     {
         NextObj(end) = _freeList;
         _freeList = start;
+        _size += n;
+    }
+
+    void PopRange(void*& start, void*& end, size_t n)
+    {
+        assert(n <= _size);
+        start = _freeList;
+        end = start;
+
+        for(size_t i = 0; i < n - 1; ++i)
+        {
+            end = NextObj(end);
+        }
+
+        _freeList = NextObj(end);
+        NextObj(end) = nullptr;
+        _size -= n;
     }
 
     void *Pop()
@@ -84,6 +105,11 @@ public:
     bool Empty()
     {
         return _freeList == nullptr;
+    }
+
+    size_t Size()
+    {
+        return _size;
     }
 
     size_t& MaxSize()
@@ -251,6 +277,8 @@ struct Span
     size_t _useCount = 0;   // 切好的小块内存，被分配给threadcache的数量
     
     void* _freeList = nullptr; // 自由链表，管理切好的小块内存
+    
+    bool _isUse = false;    // 判断该Span是否被使用
 };
 
 // 带头的双向链表，也就是一个“桶”

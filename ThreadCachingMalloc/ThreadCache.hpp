@@ -30,14 +30,33 @@ public:
             return FetchFromCentralCache(index, alignSize);
         }
     }
+
     // 释放内存
     void Deallocate(void* ptr, size_t size)
     {
         assert(ptr);
         assert(size < MAX_BYTES);
 
+        // 计算在哪个桶，然后插到桶里去
         size_t index = SizeClass::Index(size);
+        _freeLists[index].Push(ptr);
 
+        // 如果桶下的内存块的数量大于一个批次的数量时，就归还一定的内存给CentralCache
+        if(_freeLists[index].Size() >= _freeLists[index].MaxSize())
+        {
+            ListTooLong(_freeLists[index], size);
+        }
+
+    }
+
+    // 将内存还给CentralCache, 第二个参数是内存块大小
+    void ListTooLong(FreeList& list, size_t size)
+    {
+        void* start = nullptr;
+        void* end = nullptr;
+        list.PopRange(start, end, list.MaxSize());
+
+        CentralCache::GetInstance()->ReleaseListToSpans(start, size);
     }
 
     // 从CentralCache中申请内存
@@ -51,7 +70,7 @@ public:
         {
             _freeLists[index].MaxSize() += 3;
         }
-        // batchNum最小为4
+        // batchNum最小为1
 
         void* start = nullptr;
         void* end = nullptr;
@@ -60,14 +79,14 @@ public:
 
         if(actualNum == 1)
         {
-            // 如果actualNum为1，则证明没有取到内存块
+            // 如果actualNum为1，则证明只取到一块内存
             assert(start == end);
             return start;
         }
         else
         {
             // 插入ThreadCache的自由链表
-            _freeLists[index].PushRange(start, end);
+            _freeLists[index].PushRange(NextObj(start), end, actualNum);
             return start;
         }
     }

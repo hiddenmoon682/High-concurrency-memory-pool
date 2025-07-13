@@ -102,10 +102,57 @@ public:
         }
         span->_freeList = NextObj(end);
         NextObj(end) = nullptr;
+        span->_useCount += actualNum;
 
         _spanLists[index]._mtx.unlock();
 
         return actualNum;
+    }
+
+    // 将ThreadCache中的内存块拿回CentralCache
+    // 第一个参数是自由链表，末尾指向nullptr， 第二个参数是内存块大小
+    void ReleaseListToSpans(void* start, size_t size)
+    {
+        // 先计算是哪个桶下面的
+        size_t index = SizeClass::Index(size);
+        
+        // 桶锁上锁
+        _spanLists[index]._mtx.lock();
+
+        while (start)
+        {
+            // 需要计算该内存块属于哪一个span,然后将start插入span中
+            void* next = NextObj(start);
+
+            Span* span = PageCache::GetInstance()->MapObjectToSpan(start);
+            NextObj(start) = span->_freeList;
+            span->_freeList = start;
+            span->_useCount--;
+
+            // 如果span的_useCount为0，说明分配给ThreadCache的内存块已经全部还完了
+            // 接下来可以尝试将span还给PageCache中并合并span了
+            if(span->_useCount == 0)
+            {
+                // 将span从CentralCache 取下
+                _spanLists[index].Erase(span);
+                span->_next = nullptr;
+                span->_prev = nullptr;
+                span->_freeList = nullptr;
+
+                // 由于接下来又要进PageCache，所以解锁
+                _spanLists[index]._mtx.unlock();
+
+                // 还给PageCache, 进入PageCache，上锁
+                PageCache::GetInstance()->_pageMtx.lock();
+                PageCache::GetInstance()->ReleaseSpanToPageCache(span);
+                PageCache::GetInstance()->_pageMtx.unlock();
+
+                _spanLists[index]._mtx.lock();
+            }
+            start = next;
+        }
+
+        _spanLists[index]._mtx.unlock();
     }
 };
 
