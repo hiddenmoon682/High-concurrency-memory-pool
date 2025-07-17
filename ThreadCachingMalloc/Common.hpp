@@ -3,6 +3,7 @@
 #include <iostream>
 #include <assert.h>
 #include <algorithm>
+#include <cstring>
 
 #include <unordered_map>
 #include <vector>
