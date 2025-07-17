@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Common.hpp"
-
+#include "ObjectPool.hpp"
 
 // PageCache 也是只能有一份，也要使用单例模式
 class PageCache
@@ -9,6 +9,7 @@ class PageCache
 private:
     SpanList _spanLists[NPAGES];        // 哈希桶
     std::unordered_map<PAGE_ID, Span*> _idSpanMap; // 页号到SPan的映射，用于内存回收
+    ObjectPool<Span> _spanPool;
 private:
     PageCache()
     {}
@@ -17,10 +18,10 @@ private:
     static PageCache _sInst;
 public:
     // 整个PageCache的锁，而不是桶锁，因为有时需要同时访问多个桶
-    std::mutex _pageMtx;       
+    std::mutex _pageMtx;
 
     // 获取单例对象
-    static PageCache* GetInstance() 
+    static PageCache* GetInstance()
     {
         return &_sInst;
     }
@@ -29,27 +30,49 @@ public:
     Span* NewSpan(size_t k)
     {
         assert(k > 0);
-        assert(k < NPAGES);
+
+        // 大于32页(256KB)的直接向PageCache申请，如果它还大于128页，那就向系统堆申请
+        if (k > NPAGES - 1)
+        {
+            void* ptr = SystemAlloc(k);
+            // Span* span = new Span;
+            Span* span = _spanPool.New();
+            span->_pageId = (PAGE_ID)ptr >> PAGE_SHIFT;
+            span->_n = k;
+
+            // 方便后续释放内存
+            _idSpanMap[span->_pageId] = span;
+            return span;
+        }
 
         // 先去对应的桶拿Span
-        if(!_spanLists[k].Empty())
+        if (!_spanLists[k].Empty())
         {
-            return _spanLists->PopFront();
+            // 给出Span的时候，也需要在_idSpanMap里缓存
+            Span* kSpan = _spanLists[k].PopFront();      // -----------------------
+
+            for (PAGE_ID  i = 0; i < kSpan->_n; ++i)
+            {
+                _idSpanMap[kSpan->_pageId + i] = kSpan;
+            }
+
+            return kSpan;
         }
 
         // 对应位置没有span，再检查一下后面的桶里有没有span，如果有，就把他们进行切分
-        for(size_t i = k+1; i < NPAGES; ++i)
+        for (size_t i = k + 1; i < NPAGES; ++i)
         {
-            if(!_spanLists[i].Empty())
+            if (!_spanLists[i].Empty())
             {
                 // 切分
                 Span* nSpan = _spanLists[i].PopFront();
-                Span* kSpan = new Span;
+                // Span* kSpan = new Span;
+                Span* kSpan = _spanPool.New();
 
                 // 在nSpan的头部切一个k页的span
                 kSpan->_pageId = nSpan->_pageId;
                 kSpan->_n = k;
-                
+
                 nSpan->_pageId += k;
                 nSpan->_n -= k;
 
@@ -61,7 +84,7 @@ public:
                 _idSpanMap[nSpan->_pageId + nSpan->_n - 1] = nSpan;
 
                 // 建立页号和span的映射，方便将小块内存放回Span时查找span
-                for(size_t i = 0; i < k; ++i)
+                for (PAGE_ID  i = 0; i < kSpan->_n; ++i)
                 {
                     _idSpanMap[kSpan->_pageId + i] = kSpan;
                 }
@@ -73,7 +96,8 @@ public:
 
         // 到这里证明后面已经没有更多页的span了，需要向堆申请。
         // 向堆申请128页的大块span(128 * 8KB = 1024KB = 1MB)
-        Span* bigSpan = new Span;
+        // Span* bigSpan = new Span;
+        Span* bigSpan = _spanPool.New();
         void* ptr = SystemAlloc(NPAGES - 1);
         bigSpan->_pageId = (PAGE_ID)ptr >> PAGE_SHIFT;
         bigSpan->_n = NPAGES - 1;
@@ -91,9 +115,12 @@ public:
     {
         // 先计算页号
         PAGE_ID id = (PAGE_ID)obj >> PAGE_SHIFT;
+
+        std::unique_lock<std::mutex> lock(_pageMtx);
+
         // 在_idSpanMap中去找
         auto ret = _idSpanMap.find(id);
-        if(ret != _idSpanMap.end())
+        if (ret != _idSpanMap.end())
         {
             return ret->second;
         }
@@ -109,6 +136,18 @@ public:
     // 将可以合并的Span合并后再挂到PageCache上
     void ReleaseSpanToPageCache(Span* span)
     {
+        // 大于128页直接释放给堆
+        if (span->_n > NPAGES - 1)
+        {
+            void* ptr = (void*)(span->_pageId << PAGE_SHIFT);
+            SystemFree(ptr);
+
+            //delete span;
+            _spanPool.Delete(span);
+
+            return;
+        }
+
         // 尝试向前和向后合并，解决内存碎片问题
         // 向前合并
         while (1)
@@ -119,20 +158,20 @@ public:
             auto ret = _idSpanMap.find(id);
 
             // 前面的页号没找到对应的Span，不合并
-            if(ret == _idSpanMap.end())
+            if (ret == _idSpanMap.end())
             {
                 break;
             }
 
             Span* prevSpan = ret->second;
             // 前面的Span正在被使用，不合并
-            if(prevSpan->_isUse == true)
+            if (prevSpan->_isUse == true)
             {
                 break;
             }
 
             // 超出128页，无法管理，不合并
-            if(prevSpan->_n + span->_n > NPAGES - 1)
+            if (prevSpan->_n + span->_n > NPAGES - 1)
             {
                 break;
             }
@@ -141,28 +180,31 @@ public:
             span->_n += prevSpan->_n;
             span->_pageId = prevSpan->_pageId;
 
-            // 删掉prevSpan，还有因为span都是new出来的，不要忘记delete
             _spanLists[prevSpan->_n].Erase(prevSpan);
-            delete prevSpan;
+
+            //// 删掉prevSpan，还有因为span都是new出来的，不要忘记delete
+            ////delete prevSpan;
+            // 现在的Span都是由定长内存池开辟的，也需要由定长内存池delete
+            _spanPool.Delete(prevSpan);
         }
-        
+
         // 向后合并
         while (1)
         {
             PAGE_ID id = span->_pageId + span->_n;
             auto ret = _idSpanMap.find(id);
-            if(ret == _idSpanMap.end())
+            if (ret == _idSpanMap.end())
             {
                 break;
             }
 
             Span* nextSpan = ret->second;
-            if(nextSpan->_isUse == true)
+            if (nextSpan->_isUse == true)
             {
                 break;
             }
 
-            if(span->_n + nextSpan->_n > NPAGES - 1)
+            if (span->_n + nextSpan->_n > NPAGES - 1)
             {
                 break;
             }
@@ -171,7 +213,7 @@ public:
             span->_n += nextSpan->_n;
 
             _spanLists[nextSpan->_n].Erase(nextSpan);
-            delete nextSpan;
+            _spanPool.Delete(nextSpan);
         }
 
         // 将合并后的span挂上，并且为了以后方便合并，将前后PAGE_ID加进_idSpanMap

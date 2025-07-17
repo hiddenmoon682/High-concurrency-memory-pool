@@ -9,24 +9,26 @@
 
 #include <thread>
 #include <mutex>
+#include <atomic>
 
 using std::cout;
 using std::endl;
+using std::min;
 
 #ifdef _WIN64
-    typedef unsigned long long PAGE_ID;
+typedef unsigned long long PAGE_ID;
 #elif _WIN32
-    typedef size_t PAGE_ID;
+typedef size_t PAGE_ID;
 #elif __i686__
-    typedef size_t PAGE_ID;
+typedef size_t PAGE_ID;
 #elif __LP64__
-    typedef unsigned long long PAGE_ID;
+typedef unsigned long long PAGE_ID;
 #endif
 
 #if defined(_WIN32) || defined(_WIN64)
-	#include <windows.h>
+#include <windows.h>
 #elif defined(__i686__) || defined(__LP64__)
-    #include <sys/mman.h>
+#include <sys/mman.h>
 #endif
 
 
@@ -39,31 +41,42 @@ static const size_t PAGE_SHIFT = 13; // 8 * 1024 Byte = 8 KB = 2^13 Byte
 inline static void* SystemAlloc(size_t kpage)
 {
 #if defined(_WIN32) || defined(_WIN64)
-	void* ptr = VirtualAlloc(0, kpage << PAGE_SHIFT, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void* ptr = VirtualAlloc(0, kpage << PAGE_SHIFT, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #elif defined(__i686__) || defined(__LP64__)
-    void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    // void* ptr = malloc(kpage << PAGE_SHIFT);
+    //void* ptr = mmap(NULL, kpage << PAGE_SHIFT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void* ptr = malloc(kpage << PAGE_SHIFT);
 #endif
-	if (ptr == nullptr)
-		throw std::bad_alloc();
+    if (ptr == nullptr)
+        throw std::bad_alloc();
 
-	return ptr;
+    return ptr;
+}
+
+// 释放内存
+inline static void SystemFree(void* ptr)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#elif defined(__i686__) || defined(__LP64__)
+    // sbrk unmmap等
+    free(ptr);
+#endif
 }
 
 
-static void *&NextObj(void *obj)
+static void*& NextObj(void* obj)
 {
-    return *(void **)obj;
+    return *(void**)obj;
 }
 
 class FreeList
 {
 private:
-    void *_freeList = nullptr;
+    void* _freeList = nullptr;
     size_t _maxSize = 1;           // 用于慢启动调节
     size_t _size = 0;              // 自由链表挂的内存块的数量
 public:
-    void Push(void *obj)
+    void Push(void* obj)
     {
         assert(obj);
         // 头插
@@ -85,7 +98,7 @@ public:
         start = _freeList;
         end = start;
 
-        for(size_t i = 0; i < n - 1; ++i)
+        for (size_t i = 0; i < n - 1; ++i)
         {
             end = NextObj(end);
         }
@@ -95,11 +108,11 @@ public:
         _size -= n;
     }
 
-    void *Pop()
+    void* Pop()
     {
         assert(_freeList);
         // 头删
-        void *obj = _freeList;
+        void* obj = _freeList;
         _freeList = NextObj(obj);
         --_size;
         return obj;
@@ -162,24 +175,23 @@ public:
         }
         else if (size <= 1024)
         {
-            return _RoundUp(size, 8);
+            return _RoundUp(size, 16);
         }
         else if (size <= 8 * 1024)
         {
-            return _RoundUp(size, 8);
+            return _RoundUp(size, 128);
         }
         else if (size <= 64 * 1024)
         {
-            return _RoundUp(size, 8);
+            return _RoundUp(size, 1024);
         }
         else if (size <= 256 * 1024)
         {
-            return _RoundUp(size, 8);
+            return _RoundUp(size, 8 * 1024);
         }
         else
         {
-            assert(false);
-            return -1;
+            return _RoundUp(size, 1 << PAGE_SHIFT);
         }
     }
 
@@ -204,7 +216,7 @@ public:
     {
         assert(bytes <= MAX_BYTES);
 
-        static int group_array[4] = {16, 56, 56, 56}; // 每个区间内桶的个数
+        static int group_array[4] = { 16, 56, 56, 56 }; // 每个区间内桶的个数
         if (bytes <= 128)
         {
             return _Index(bytes, 3);
@@ -239,32 +251,32 @@ public:
         assert(size > 0);
 
         size_t num = MAX_BYTES / size;
-        if(num <= 2)
+        if (num <= 2)
             num = 2;
-        
-        if(num > 512)
+
+        if (num > 512)
             num = 512;
-        
+
         return num;
     }
 
-	// 计算一次向系统获取几个页
-	// 单个对象 8byte
-	// ...
-	// 单个对象 256KB
+    // 计算一次向系统获取几个页
+    // 单个对象 8byte
+    // ...
+    // 单个对象 256KB
     // size 是内存块大小，返回值是页数
-	static size_t NumMovePage(size_t size)
-	{
+    static size_t NumMovePage(size_t size)
+    {
         // 计算一批内存块的数量*size得到总共的大小
-		size_t num = NumMoveSize(size);
-		size_t npage = num*size;
+        size_t num = NumMoveSize(size);
+        size_t npage = num * size;
         // 除以 8KB
-		npage >>= PAGE_SHIFT;
-		if (npage == 0)
-			npage = 1;
+        npage >>= PAGE_SHIFT;
+        if (npage == 0)
+            npage = 1;
 
-		return npage;
-	}
+        return npage;
+    }
 
 };
 
@@ -277,10 +289,11 @@ struct Span
     Span* _next = nullptr;  // 双向链表的前后指针
     Span* _prev = nullptr;
 
+    size_t _objSize = 0;    // 切好的小块内存的大小
     size_t _useCount = 0;   // 切好的小块内存，被分配给threadcache的数量
-    
+
     void* _freeList = nullptr; // 自由链表，管理切好的小块内存
-    
+
     bool _isUse = false;    // 判断该Span是否被使用
 };
 

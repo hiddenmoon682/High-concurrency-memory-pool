@@ -65,7 +65,7 @@ public:
         // ThreadCache申请时需要申请一批内存块，不能太多也不能太少
         // 这里采用慢启动反馈调节算法
         // 一次一批，每次逐渐增多，直到达到上限
-        size_t batchNum = std::min(_freeLists[index].MaxSize(), SizeClass::NumMoveSize(size));
+        size_t batchNum = min(_freeLists[index].MaxSize(), SizeClass::NumMoveSize(size));
         if(batchNum == _freeLists[index].MaxSize())
         {
             _freeLists[index].MaxSize() += 3;

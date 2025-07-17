@@ -1,4 +1,4 @@
-tcmalloc:main.cc
+tcmalloc:BenchMark.cc
 	g++ -o $@ $^ -std=c++11
 .PHONY:clean
 
