@@ -39,3 +39,8 @@
 
 # debug information files
 *.dwo
+
+# 编译产物（无扩展名二进制，可经 make / g++ 重新生成）
+/ThreadCachingMalloc/tcmalloc
+/ThreadCachingMalloc/gtcmalloc
+/Fixed_length_memory_pool/Objectpool
