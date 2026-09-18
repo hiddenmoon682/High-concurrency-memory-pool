@@ -12,6 +12,7 @@
 //   T5  桶号在 [0, NFREELIST) 内，且最大尺寸正好落在最后一个桶；
 //   T6  真实分配的地址 16 字节对齐，且块之间互不覆盖（canary 花纹校验）；
 //   T8  span 末块不得越出 span（活块间距检测 + 按整块大小写入花纹校验）；
+//   T9  大块（>256KB）相邻分配/释放：释放后的存活块不得被误合并、被覆盖；
 //   T7  MAX_BYTES 边界（对齐后正好 256KB）可申请可释放 —— 必须放在最后，
 //       因为修复前它会触发 assert 直接 abort，后面的用例就没机会跑了。
 
@@ -416,6 +417,87 @@ static void TestSpanTailNoOverrun()
     }
 }
 
+// T9: 大块（>256KB，走 PageCache 直通路径）相邻分配 / 释放
+// 守护的缺陷：大块路径拿到 Span 后没有置 _isUse = true，于是释放时
+// ReleaseSpanToPageCache 会把相邻的"活"大块当成空闲 Span 合并进来：
+//   ① 合并会对一个从未挂进链表的 Span 调 Erase()，它的 _next/_prev 是 nullptr，
+//      直接空指针崩溃（修复前本用例会以 0xC0000005 结束）；
+//   ② 被误合并的活块还会被 _spanPool.Delete 回收，成为 use-after-free。
+static void TestLargeBlockAdjacentFree()
+{
+    const size_t SZ = 300000;   // > 256KB 且 37 页 <= 128，走的正是会崩的那条路
+    const size_t N = 6;
+
+    std::vector<uintptr_t> v;
+    v.reserve(N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        v.push_back(reinterpret_cast<uintptr_t>(ConcurrentAlloc(SZ)));
+    }
+    for (size_t i = 0; i < N; ++i)
+    {
+        memset(reinterpret_cast<void*>(v[i]), (unsigned char)(0xA0 + i), SZ);
+    }
+
+    // 释放偶数号（修复前，这一步就会崩溃）
+    printf("        T9 释放相邻大块的偶数号...\n");
+    for (size_t i = 0; i < N; i += 2)
+    {
+        ConcurrentFree(reinterpret_cast<void*>(v[i]));
+    }
+
+    // 再申请同尺寸，让刚释放的内存被复用；若活块被误合并，这里就会覆盖到它
+    std::vector<uintptr_t> w;
+    for (size_t i = 0; i < 3; ++i)
+    {
+        w.push_back(reinterpret_cast<uintptr_t>(ConcurrentAlloc(SZ)));
+        memset(reinterpret_cast<void*>(w[i]), 0x5C, SZ);
+    }
+
+    // 存活块（奇数号）花纹必须完好
+    size_t corrupted = 0;
+    for (size_t i = 1; i < N; i += 2)
+    {
+        const unsigned char want = (unsigned char)(0xA0 + i);
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(v[i]);
+        for (size_t b = 0; b < SZ; ++b)
+        {
+            if (p[b] != want)
+            {
+                ++corrupted;
+                printf("        存活块[%zu] 偏移 %zu 被覆盖（0x%02X != 0x%02X）\n", i, b, p[b], want);
+                break;
+            }
+        }
+    }
+
+    // 存活块与"释放后重新申请"的块不能重叠
+    size_t overlapped = 0;
+    for (size_t i = 1; i < N; i += 2)
+    {
+        for (size_t j = 0; j < w.size(); ++j)
+        {
+            if (v[i] < w[j] + SZ && w[j] < v[i] + SZ)
+            {
+                ++overlapped;
+                printf("        存活块[%zu] @0x%llx 与复用块[%zu] @0x%llx 重叠\n",
+                       i, (unsigned long long)v[i], j, (unsigned long long)w[j]);
+            }
+        }
+    }
+
+    if (corrupted == 0 && overlapped == 0)
+    {
+        ++g_passed;
+        printf("  PASS  T9  大块相邻释放：存活块未被覆盖/未被误合并\n");
+    }
+    else
+    {
+        ++g_failed;
+        printf("  FAIL  T9  大块相邻释放：%zu 个存活块被覆盖，%zu 对重叠\n", corrupted, overlapped);
+    }
+}
+
 // T7: 对齐后正好等于 MAX_BYTES 的请求也必须能申请、能释放
 static void TestMaxBytesBoundary()
 {
@@ -443,6 +525,9 @@ static void TestMaxBytesBoundary()
 
 int main()
 {
+    // 关闭 stdout 缓冲：万一某个用例让进程崩溃，前面已经跑过的结论不会丢
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     printf("=== 尺寸分类 / 内存池不变量测试 ===\n");
     TestRoundUpIsMultipleOf16();
     TestRoundUpIdempotent();
@@ -451,7 +536,8 @@ int main()
     TestBucketIndexLegal();
     TestAllocationAlignmentAndCanary();
     TestSpanTailNoOverrun();
-    TestMaxBytesBoundary();   // 必须最后：修复前这一项会 abort
+    TestLargeBlockAdjacentFree();   // 修复前会崩溃
+    TestMaxBytesBoundary();         // 必须最后：修复前这一项会 abort
 
     printf("\n结果：%d 项通过，%d 项失败\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;

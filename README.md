@@ -113,7 +113,7 @@ make                  # 产物 Objectpool
 │   ├── ObjectPool.hpp            #   定长对象池（内部对象分配）
 │   ├── Common.hpp                #   公共定义（Span/SizeClass/FreeList）
 │   ├── UnitTest.hpp              #   单元测试
-│   ├── AlignTest.cc              #   对齐 / 桶号 / 边界不变量测试（独立 main）
+│   ├── AlignTest.cc              #   不变量与回归测试（对齐/桶号/span/大块合并/边界）
 │   ├── BenchMark.cc              #   性能基准（vs malloc）
 │   ├── main.cc                   #   测试入口
 │   └── Log/                      #   日志模块
