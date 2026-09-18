@@ -61,6 +61,8 @@
 - **大块直通**：申请 > 256KB 时跳过线程/中心缓存，直接按页向 PageCache/系统申请（正好 256KB 仍走尺寸档，是最后一个桶）；
 - **回收与合并**：释放时经页号→Span 映射反查归属，PageCache 将相邻空闲页合并成大 span（内存回收模块）；
 - **平台兼容**：Windows 走 `VirtualAlloc`/`VirtualFree`，Linux/macOS 走系统分配。
+- **页映射可切换**：`PageMap.hpp` 顶部 `TC_USE_RADIX_PAGEMAP`（默认 1）选用三层基数树（读侧免锁）；
+  用 `-DTC_USE_RADIX_PAGEMAP=0` 可切回原来的 `unordered_map` 实现做前后对比；
 
 ---
 

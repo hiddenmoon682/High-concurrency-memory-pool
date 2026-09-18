@@ -53,6 +53,7 @@ public:
 
     PageMap() : _nodes(0), _top(NewTop()) {}
     PageMap(const PageMap&) = delete;
+    PageMap& operator=(const PageMap&) = delete;   // 隐式拷贝赋值会浅拷贝 _top/_nodes，同样必须禁止
 
     Span* get(PAGE_ID k) const
     {
@@ -145,6 +146,51 @@ private:
         }
         return leaf;
     }
+};
+
+#else   // TC_USE_RADIX_PAGEMAP == 0
+
+// 对照实现：保留替换前的 unordered_map 行为（lookup 需要加锁）。
+// 只用于前后性能对比与回退，接口与基数树版本完全一致。
+//
+// 加锁顺序说明：PageCache 的写路径先持 _pageMtx 再调 set()/clearRange()，
+// 即顺序恒为 _pageMtx -> _mtx；get() 只拿 _mtx，且调用时不持 _pageMtx。
+// 不存在 _mtx -> _pageMtx 的路径，因此不会死锁。
+class PageMap
+{
+public:
+    PageMap() {}
+
+    Span* get(PAGE_ID k) const
+    {
+        std::lock_guard<std::mutex> lock(_mtx);
+        Map::const_iterator it = _map.find(k);
+        return it == _map.end() ? nullptr : it->second;
+    }
+
+    void set(PAGE_ID k, Span* v)
+    {
+        std::lock_guard<std::mutex> lock(_mtx);
+        _map[k] = v;
+    }
+
+    void clearRange(PAGE_ID start, size_t n)
+    {
+        std::lock_guard<std::mutex> lock(_mtx);
+        for (size_t i = 0; i < n; ++i) _map.erase(start + i);
+    }
+
+    // 对照实现里没有"节点"概念，返回当前映射条目数
+    size_t nodesAllocated() const
+    {
+        std::lock_guard<std::mutex> lock(_mtx);
+        return _map.size();
+    }
+
+private:
+    typedef std::unordered_map<PAGE_ID, Span*> Map;
+    mutable std::mutex _mtx;   // 独立于 PageCache::_pageMtx，避免与写侧自锁
+    Map _map;
 };
 
 #endif   // TC_USE_RADIX_PAGEMAP
