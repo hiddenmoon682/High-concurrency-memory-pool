@@ -17,8 +17,11 @@ static void* ConcurrentAlloc(size_t size)
         size_t alignSize = SizeClass::RoundUp(size);
         size_t kpage = alignSize >> PAGE_SHIFT;
 
-        // 进入PageCache，上锁
-        PageCache::GetInstance()->_pageMtx.lock();
+        // 进入PageCache，上锁。
+        // 必须用 lock_guard 而不是裸 lock()/unlock()：NewSpan 内部会分配基数树节点
+        // （PageMap::set -> EnsureLeaf -> SystemAlloc），SystemAlloc 可能抛 std::bad_alloc；
+        // 裸 unlock 在异常路径上会被跳过，_pageMtx 永不释放 -> 全局死锁。
+        std::lock_guard<std::mutex> pageLock(PageCache::GetInstance()->_pageMtx);
         Span* span = PageCache::GetInstance()->NewSpan(kpage);
         span->_objSize = alignSize;
         // 大块也必须标记为"正在使用"。否则释放时 PageCache 会把这块内存当成空闲 Span，
@@ -26,7 +29,6 @@ static void* ConcurrentAlloc(size_t size)
         // 链表的 Span 调 Erase()，其 _next/_prev 为 nullptr，直接空指针崩溃（0xC0000005），
         // 并且被误合并的活块还会被 _spanPool.Delete 回收，变成 use-after-free。
         span->_isUse = true;
-        PageCache::GetInstance()->_pageMtx.unlock();
 
         void* ptr = (void*)(span->_pageId << PAGE_SHIFT);
         return ptr;
@@ -59,9 +61,12 @@ static void ConcurrentFree(void* ptr)
         // _pageMap。这里不持有桶锁，不会与上面的加锁顺序冲突。
         // 注意"免锁"只针对读侧：上面的 MapObjectToSpan（_pageMap.get）不拿任何锁，
         // 写侧的 NewSpan/ReleaseSpanToPageCache 仍然必须持 _pageMtx。
-        PageCache::GetInstance()->_pageMtx.lock();
-        PageCache::GetInstance()->ReleaseSpanToPageCache(span);
-        PageCache::GetInstance()->_pageMtx.unlock();
+        // 同样用 lock_guard：临界区内的合并与 PageMap::set 都可能抛异常（OOM），
+        // 裸 unlock 会被异常绕过，导致全局锁永久泄漏。
+        {
+            std::lock_guard<std::mutex> pageLock(PageCache::GetInstance()->_pageMtx);
+            PageCache::GetInstance()->ReleaseSpanToPageCache(span);
+        }
     }
     else
     {

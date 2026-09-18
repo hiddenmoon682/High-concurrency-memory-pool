@@ -105,6 +105,10 @@ g++ -o page_map_test_hash PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && 
 g++ -O2 -o stress_test StressTest.cc -std=c++11 && ./stress_test
 g++ -O2 -o stress_test_hash StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./stress_test_hash
 
+# 页映射性能探针（README 那张表的来源，两种实现各跑一遍）
+g++ -O2 -o _perf_radix PerfProbe.cc -std=c++11 && ./_perf_radix
+g++ -O2 -o _perf_hash  PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./_perf_hash
+
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
 make                  # 产物 Objectpool
@@ -119,13 +123,14 @@ make                  # 产物 Objectpool
 
 ### 页映射替换前后（`steady_clock`，每线程 10 万次，16 字节）
 
-测量方式：临时探针（每线程先预热 10 万次申请/释放，再计时一轮 10 万次申请与一轮 10 万次释放），
-取"线程内平均延迟"（各线程耗时之和 ÷ 总操作数），单位 ns/op，`g++ -O2 -std=c++11`。
-基线与对照实际使用的编译命令：
+测量方式：仓库内的探针 `ThreadCachingMalloc/PerfProbe.cc`（每线程先预热 10 万次申请/释放，
+再计时一轮 10 万次申请与一轮 10 万次释放），取"线程内平均延迟"（各线程耗时之和 ÷ 总操作数），
+单位 ns/op，`g++ -O2 -std=c++11`。复现命令：
 
 ```
-g++ -O2 -o _perf_radix _perf.cc -std=c++11                              # 基数树（默认 mode 1，不加 -D）
-g++ -O2 -o _perf_hash  _perf.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0     # 对照
+g++ -O2 -o _perf_radix PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1，不加 -D）
+g++ -O2 -o _perf_hash  PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
+./_perf_radix ; ./_perf_hash
 ```
 
 | 线程数 | 基数树 alloc | 基数树 free | unordered_map alloc | unordered_map free |
@@ -135,8 +140,10 @@ g++ -O2 -o _perf_hash  _perf.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0     # 对照
 | 4 | 23.6 | 16.6 | 58.4 | 91.7 |
 | 8 | 71.8 | 70.7 | 107.2 | 357.7 |
 
-上表是一次代表性运行；同一二进制重复三次的 8 线程 free 区间为 55.8–71.6（基数树）与
-357.7–419.1（对照），两者不重叠，结论稳定。
+**口径 caveat**：表中数字是**本机（i9-12900HX）**的单次代表性运行；换机器绝对值会有差异，
+别把某一位小数当结论。同一二进制重复三次的 8 线程 free 区间为 55.8–71.6（基数树）与
+357.7–419.1（对照），两者不重叠。终审在另一环境独立复现时，对照侧区间低 14–24%，
+**方向与 ~5× 的量级一致**。
 
 说明：free 一侧的收益来自「不再为每次查找获取 `PageCache::_pageMtx`」；
 批量归还仍要拿 CentralCache 的桶锁，因此**不承诺追上 `malloc`**。
@@ -161,6 +168,7 @@ alloc 一侧同样受益，但只体现在**多线程**：2 线程 17.6→12.4�
 │   ├── PageMapTest.cc            #   页映射单元测试（独立 main）
 │   ├── AlignTest.cc              #   不变量与回归测试（对齐/桶号/span/大块合并/边界）
 │   ├── StressTest.cc             #   多线程混合尺寸压力测试（独立 main）
+│   ├── PerfProbe.cc              #   页映射性能探针（README 那几张表的来源）
 │   ├── BenchMark.cc              #   性能基准（vs malloc）
 │   ├── main.cc                   #   测试入口
 │   └── Log/                      #   日志模块
@@ -172,6 +180,32 @@ alloc 一侧同样受益，但只体现在**多线程**：2 线程 17.6→12.4�
 
 ---
 
-## 五、开发记录
+## 五、已知问题（backlog）
+
+以下是**当前已知、尚未修复**的问题。写在这里是为了不让它们被"测试全绿"的表象掩盖。
+
+1. **从未分配过内存的线程无法释放小对象。**
+   `ConcurrentFree` 对小对象直接走 `pTLSThreadCache->Deallocate(ptr, size)`
+   （`ConcurrentAlloc.hpp`），而 `pTLSThreadCache` 是 `thread_local`、只在
+   `ConcurrentAlloc` 的小对象分支里惰性初始化。于是"一个只释放、从不分配"的线程
+   首次调用 `ConcurrentFree` 时 `pTLSThreadCache` 仍是 `nullptr`：
+   debug 构建下 `assert(pTLSThreadCache)` 直接 abort，release 构建下空指针解引用崩溃。
+   **`StressTest.cc` 的消费者线程里有 `ConcurrentFree(ConcurrentAlloc(16));` 这行预热，
+   它规避了该缺陷，同时也把它掩盖了**——去掉那行，消费者线程一启动就会崩。
+   真正的修法在 `ConcurrentFree`：小对象分支也要做与 `ConcurrentAlloc` 相同的惰性初始化
+   （`if (pTLSThreadCache == nullptr) { ... tcPool.New(); }`），而不是依赖调用方预热。
+2. **`BenchMark.cc:86` 有一个 `-Wunused-variable` 警告。**
+   `if (i == 550) { int x = 0; }` 里的 `x` 声明后从未使用。属既有问题、与页映射替换无关；
+   一行 `(void)x;` 即可消除。带 `-Wall -Wextra` 构建 `BenchMark.cc` 时会出现这一条警告
+   （其余测试程序零警告）。
+3. **页映射节点内存永不回收（刻意设计）。**
+   `PageMap` 的 Top/Mid/Leaf 节点按需分配，但**从不释放**：地址空间用过的页号区间会
+   永久保留其节点。这是有意的权衡（免锁读要求节点生命周期不因回收而结束），
+   但代价是"曾经触达过的地址空间范围"会驻留内存。若将来出现长期运行且地址空间碎片化的
+   场景，需要重新评估（可回收方案会与"读侧免锁"冲突）。
+
+---
+
+## 六、开发记录
 
 按提交历史：初始提交 → ThreadCache → CentralCache → PageCache → 内存回收模块 → 修复 → **基数树页号映射优化**（当前最新）。

@@ -42,11 +42,15 @@ public:
         list._mtx.unlock();
         // 走到这里说明没有现成的，因此需要向PageCache里申请,需要加锁
         // 向PageCache申请时也需要确定申请的Span是包含几页的。
-        PageCache::GetInstance()->_pageMtx.lock();
-        Span* span = PageCache::GetInstance()->NewSpan(SizeClass::NumMovePage(size));
-        span->_isUse = true;
-        span->_objSize = size;
-        PageCache::GetInstance()->_pageMtx.unlock();
+        // 用 lock_guard：NewSpan 内部会分配基数树节点（可能抛 std::bad_alloc），
+        // 裸 unlock 会被异常绕过、_pageMtx 永久泄漏 -> 全局死锁。
+        Span* span = nullptr;
+        {
+            std::lock_guard<std::mutex> pageLock(PageCache::GetInstance()->_pageMtx);
+            span = PageCache::GetInstance()->NewSpan(SizeClass::NumMovePage(size));
+            span->_isUse = true;
+            span->_objSize = size;
+        }
         // 得到新的Span后需要将大的内存块切成小块并挂到自由链表上
         // 先算出这块内存的地址范围（按字节），三步：
         //  ① 起始地址：页号左移 PAGE_SHIFT(13) 位还原成真实虚拟地址（8KB 页对齐的基址）
@@ -156,10 +160,14 @@ public:
                 // 由于接下来又要进PageCache，所以解锁
                 _spanLists[index]._mtx.unlock();
 
-                // 还给PageCache, 进入PageCache，上锁
-                PageCache::GetInstance()->_pageMtx.lock();
-                PageCache::GetInstance()->ReleaseSpanToPageCache(span);
-                PageCache::GetInstance()->_pageMtx.unlock();
+                // 还给PageCache, 进入PageCache，上锁。
+                // 作用域严格限定在这一次调用上：下面必须先把桶锁重新锁上，
+                // 才能继续遍历剩余的内存块（顺序与改造前完全一致）。
+                // lock_guard 保证异常（OOM）时 _pageMtx 一定被释放。
+                {
+                    std::lock_guard<std::mutex> pageLock(PageCache::GetInstance()->_pageMtx);
+                    PageCache::GetInstance()->ReleaseSpanToPageCache(span);
+                }
 
                 _spanLists[index]._mtx.lock();
             }

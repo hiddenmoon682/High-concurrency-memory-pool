@@ -13,8 +13,10 @@
 //   T6  真实分配的地址 16 字节对齐，且块之间互不覆盖（canary 花纹校验）；
 //   T8  span 末块不得越出 span（活块间距检测 + 按整块大小写入花纹校验）；
 //   T9  大块（>256KB）相邻分配/释放：存活块不得被误合并、被覆盖；复用块花纹完好且互不重叠；
-//   T10 合并回收后存活块不得被覆盖、不得与新块重叠（不校验映射内部条目，见函数注释）；
-//   T10b >1MB（>128 页）的"直接还给系统"释放分支下，存活块同样不得被覆盖/被新块重叠；
+//       并校验页映射内部条目一致（桶内 Span 只有首/尾页有映射，见函数注释）；
+//   T10 合并回收后存活块不得被覆盖、不得与新块重叠；每轮校验页映射内部条目一致；
+//   T10b >1MB（>128 页）的"直接还给系统"释放分支下，存活块同样不得被覆盖/被新块重叠，
+//       且释放后首页映射必须已清除；
 //   T7  MAX_BYTES 边界（对齐后正好 256KB）可申请可释放 —— 必须放在最后，
 //       因为修复前它会触发 assert 直接 abort，后面的用例就没机会跑了。
 
@@ -29,6 +31,21 @@
 
 static int g_passed = 0;
 static int g_failed = 0;
+
+// 页映射一致性检查（探针）。
+// PageCache::DebugCheckPageMap() 校验：每个停在页缓存桶里的 Span，其范围内
+// **只有首/尾页建立映射、内部页一律为 nullptr**。
+// 返回 true 表示一致。**不用 assert 实现** —— assert 会在 -DNDEBUG 下被编译掉，
+// 那样这条覆盖又会退化成"不会失败的检查"；这里靠调用方把返回值计入失败计数。
+static bool CheckPageMapConsistent(const char* where)
+{
+    if (PageCache::GetInstance()->DebugCheckPageMap())
+    {
+        return true;
+    }
+    printf("  FAIL  页映射内部条目不一致：桶内 Span 应只有首/尾页有映射（%s）\n", where);
+    return false;
+}
 
 struct Violation
 {
@@ -426,8 +443,13 @@ static void TestSpanTailNoOverrun()
 //   ① 合并会对一个从未挂进链表的 Span 调 Erase()，它的 _next/_prev 是 nullptr，
 //      直接空指针崩溃（修复前本用例会以 0xC0000005 结束）；
 //   ② 被误合并的活块还会被 _spanPool.Delete 回收，成为 use-after-free。
-// 校验范围（**不含**映射内部条目）：① 存活块（v 的奇数号）花纹完好且与复用块不重叠；
-// ② 复用块（w）自身花纹完好、且 w 块之间互不重叠 —— 与 T10/T10b 的判据一致。
+// 校验范围：① 存活块（v 的奇数号）花纹完好；② 存活块与新建块（w）地址不重叠；
+//   ③ w 块自身花纹完好、w 块之间互不重叠；
+//   ④ **页映射内部条目一致性**（PageCache::DebugCheckPageMap，仅 debug 构建真实生效）；
+//   ⑤ 刚释放的 >1MB 块的首页已无映射（DebugIsPageMapped）——那条"直接还给系统"的分支
+//      原本只映射首页，释放时必须把这一页清掉，否则残留悬垂条目。
+// ④⑤ 是"清理陈旧映射"这条设计目标唯二的可证伪覆盖：删掉 ReleaseSpanToPageCache 里
+// 任意一处 clearRange，本用例都会 FAIL（变异证据见 task-8 报告）。
 static void TestLargeBlockAdjacentFree()
 {
     const size_t SZ = 300000;   // > 256KB 且 37 页 <= 128，走的正是会崩的那条路
@@ -518,6 +540,7 @@ static void TestLargeBlockAdjacentFree()
 
     for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
 
+    if (!CheckPageMapConsistent("T9")) ++corrupted;    // 映射不一致也计入本用例的失败
     if (corrupted == 0 && corruptedNew == 0 && overlapped == 0)
     {
         ++g_passed;
@@ -534,13 +557,13 @@ static void TestLargeBlockAdjacentFree()
 // T10: 合并回收后，存活块不得被覆盖、不得与新块重叠
 // 序列：A、B 相邻大块 -> 释放 A（进页缓存）-> 释放 B（向前合并，A 的 Span 被回收）
 //       -> 再申请与 A 另一侧相邻的 D 并释放（这一步在旧实现里可能命中已回收的 A）
-// 校验范围（**不含**映射内部条目）：本用例只校验
-//   ① 存活块（v 的奇数号）花纹完好；
-//   ② 存活块与新建块（w）地址不重叠；
-//   ③ w 块自身花纹完好、且 w 块之间互不重叠。
-// 它【不】检查页映射内部是否残留指向已回收 Span 的悬垂条目 —— AlignTest 够不到
-// PageCache 的私有映射。替换前的实现同样通过本用例（见 task-5-report.md 的 Step 3），
-// 因此它**不能**作为"陈旧映射已被修复"的证明，只是一条行为不变量回归保护。
+// 校验范围（含映射内部条目）：
+//   ① 存活块（v 的奇数号）花纹完好；② 存活块与新建块（w）地址不重叠；
+//   ③ w 块自身花纹完好、且 w 块之间互不重叠；
+//   ④ 每轮（释放 + 再申请之后）调用 PageCache::DebugCheckPageMap：校验
+//      **桶内 Span 只有首/尾页有映射、内部页为 nullptr**。
+// ④ 才是"合并吸收掉的旧区间已被清干净"的可证伪覆盖；单靠 ①②③ 无法发现
+// "合并后仍残留指向已回收 Span 的内部条目"（旧实现同样能通过 ①②③）。
 static void TestStaleMapAfterMerge()
 {
     const size_t SZ = 300000;   // 37 页，>256KB 且 <=128 页，走的正是会合并的路径
@@ -607,6 +630,14 @@ static void TestStaleMapAfterMerge()
 
         for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
 
+        // ④ 每轮都校验页映射内部条目：桶内 Span 只应有首/尾页映射
+        if (!CheckPageMapConsistent("T10"))
+        {
+            ++g_failed;
+            printf("  FAIL  T10 第 %d 轮：页映射内部条目不一致\n", round);
+            return;
+        }
+
         if (corruptLive != 0 || corruptNew != 0 || overlapped != 0)
         {
             ++g_failed;
@@ -617,10 +648,10 @@ static void TestStaleMapAfterMerge()
     }
 
     ++g_passed;
-    // 措辞必须诚实：本用例只校验"存活块未被覆盖 + 存活块与新块不重叠"，
-    // 它【不】检查映射内部是否残留悬垂条目（AlignTest 够不到 PageCache 的私有映射）。
-    // 因此 PASS 文案不得宣称"映射无残留"。
-    printf("  PASS  T10 合并回收后存活块未被覆盖、未与新块重叠（20 轮；不校验映射内部条目）\n");
+    // 措辞与校验范围对齐：本用例校验"存活块未被覆盖 + 存活块与新块不重叠"，
+    // 并且**每轮**都调用 DebugCheckPageMap 校验"桶内 Span 只有首/尾页有映射、
+    // 内部页为 nullptr"（见函数头注释 ④）。该检查对"合并后残留悬垂条目"是可证伪的。
+    printf("  PASS  T10 合并回收后存活块未被覆盖、未与新块重叠，且页映射内部条目一致（20 轮）\n");
 }
 
 // T10b: 覆盖 >1MB（>128 页）那条"直接还给系统"的释放路径
@@ -653,10 +684,19 @@ static void TestStaleMapLargeSpan()
         memset(reinterpret_cast<void*>(v[i]), (unsigned char)(0xC0 + i), SZ);
     }
 
-    // 释放偶数号：这一步走的就是 >128 页的"直接还系统"分支
+    // 释放偶数号：这一步走的就是 >128 页的"直接还系统"分支。
+    // 释放前先记下首页页号：释放后该页的映射必须消失（DebugIsPageMapped）。
+    // 这类 span 只建立过首页这一条映射，删掉 clearRange 就会留下悬垂条目。
+    size_t stalePage = 0;
     for (size_t i = 0; i < N; i += 2)
     {
+        const PAGE_ID p = (PAGE_ID)(v[i] >> PAGE_SHIFT);
         ConcurrentFree(reinterpret_cast<void*>(v[i]));
+        if (PageCache::GetInstance()->DebugIsPageMapped(p))
+        {
+            ++stalePage;
+            printf("        已释放的 >1MB 块首页 %llu 仍留在映射里（悬垂条目）\n", (unsigned long long)p);
+        }
     }
 
     // 再申请同尺寸，迫使这段地址被复用
@@ -708,16 +748,19 @@ static void TestStaleMapLargeSpan()
     for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
     for (size_t i = 1; i < N; i += 2) ConcurrentFree(reinterpret_cast<void*>(v[i]));
 
-    if (corruptLive == 0 && corruptNew == 0 && overlapped == 0)
+    if (!CheckPageMapConsistent("T10b")) ++corruptLive;   // ④ 桶内 Span 只应有首/尾页映射
+
+    if (corruptLive == 0 && corruptNew == 0 && overlapped == 0 && stalePage == 0)
     {
         ++g_passed;
-        printf("  PASS  T10b >1MB 释放路径：存活块与新块花纹完好、互不重叠\n");
+        printf("  PASS  T10b >1MB 释放路径：花纹完好、互不重叠，且释放后首页映射已清除\n");
     }
     else
     {
         ++g_failed;
-        printf("  FAIL  T10b >1MB 释放路径：存活块花纹异常 %zu 个，新块花纹异常 %zu 个，重叠 %zu 对\n",
-               corruptLive, corruptNew, overlapped);
+        printf("  FAIL  T10b >1MB 释放路径：存活块花纹异常 %zu 个，新块花纹异常 %zu 个，"
+               "重叠 %zu 对，释放后残留映射 %zu 个\n",
+               corruptLive, corruptNew, overlapped, stalePage);
     }
 }
 
