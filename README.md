@@ -96,8 +96,9 @@ g++ -o align_test AlignTest.cc -std=c++11
 g++ -o page_map_test PageMapTest.cc -std=c++11 && ./page_map_test
 g++ -o page_map_test_hash PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./page_map_test_hash
 
-# 多线程混合尺寸压力测试
+# 多线程混合尺寸压力测试（两种实现各跑一遍）
 g++ -O2 -o stress_test StressTest.cc -std=c++11 && ./stress_test
+g++ -O2 -o stress_test_hash StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./stress_test_hash
 
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
