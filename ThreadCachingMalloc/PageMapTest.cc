@@ -79,14 +79,19 @@ int main()
         PageMap m;
         Span a;
         Span b;
-        // 跨叶：2047 与 2048 相差 2^11 页（16MB），落进两棵不同的 Leaf
+        // 跨叶：2047 与 2048 只相差 1 页，但正好落在叶边界两侧。
+        // 叶下标 = (k >> 11) & 4095：2047 -> 0、2048 -> 1；两页的 mid 下标都是 0，
+        // 所以它们进的是 mid[0] 下的两棵不同 Leaf —— 这才是"跨叶"要覆盖的路径。
+        // （槽位下标分别是 2047 与 0。）
         m.set(2047, &a);
         m.set(2048, &b);
         const size_t before = m.nodesAllocated();   // 基线取在 set 之后：要证明的是 clearRange 不分配
         m.clearRange(2047, 2);
         Check(m.get(2047) == nullptr && m.get(2048) == nullptr, "T13 clearRange 跨叶清理两页");
         Check(m.nodesAllocated() == before, "T14 clearRange 跨叶不分配节点");
-        // 跨 Mid：两页相差 2^23 页（64GB），leaf 下标相同但 Mid 不同
+        // 跨 Mid：2^23-1 与 2^23 同样只相差 1 页，但 mid 下标 = (k >> 23) & 4095 从 0 变成 1；
+        // 两页落在各自的 mid 节点里，且槽位下标同为 2047（与页 0 的槽位相同），
+        // 刚好覆盖"不同 mid、同槽位"这条最容易写错的路径。
         const PAGE_ID midBase = (PAGE_ID)1 << SPEC_SHIFT1;
         m.set(midBase - 1, &a);
         m.set(midBase, &b);
@@ -100,14 +105,20 @@ int main()
     {
         PageMap m;
         Span a;
-        m.set(100, &a);
-        // 越界区间：start + n 回绕越过 2^35 页号边界，两种实现都必须跳过。
-        // 诚实说明：这是"两种实现行为一致"的检查，**不是**一条能单独证伪 (g) 的
-        // 回归测试 —— 对照实现以完整页号为键，回绕后的 2^35±k 与范围内页号是不同的键，
-        // 实测（见 task-7-report.md）去掉跳过语句后本断言仍然通过。跳过语句的价值在于
-        // 语义确定（不会被误当成"清理了低地址页"）以及与基数树侧对称。
+        Span b;
+        // 越界区间：clearRange 从 2^35-1 起、n=3，后两页越过 2^35 页号边界。
+        //
+        // 基数树配置下这条检查**可以失败**：页号只取低 35 位做下标，所以 2^35+k 的
+        // 下标与页 k 完全相同（mid 下标 0、叶下标 0、槽位下标 k）。一旦去掉 clearRange
+        // 的越界跳过，这里就会把页 0 和页 1 误清 —— 因此下面映射的正是页 0、页 1。
+        //
+        // 对照配置下这条检查**不可能失败**：unordered_map 以**完整页号**为键，
+        // 2^35+k 与任何范围内页号都是不同的键，erase 只会空操作；那里的越界跳过
+        // 只保证语义确定（越界页不会被当成"已清理"），与基数树侧保持行为一致。
+        m.set(0, &a);
+        m.set(1, &b);
         m.clearRange(((PAGE_ID)1 << SPEC_BITS) - 1, 3);
-        Check(m.get(100) == &a, "T17 clearRange 越界区间被跳过、不波及范围内条目");
+        Check(m.get(0) == &a && m.get(1) == &b, "T17 clearRange 越界区间被跳过、不误清低地址页");
     }
 
 #if TC_USE_RADIX_PAGEMAP
@@ -133,15 +144,17 @@ int main()
 
         m.set(10, &a);
         m.set(11, &a);
-        m.set(0, &s0);              // 最小页号；叶下标 0，与 base 同槽位
-        m.set(base - 1, &s1);       // 叶边界前一页；叶下标 2047
-        m.set(base, &s2);           // 叶边界后一页；叶下标 0（与 s0 同槽位，不同的叶）
+        // 说明：下面口中的"槽位下标"指 Leaf::values 的下标 = k & (LEAF_LENGTH-1)，
+        // 与"叶下标"（(k >> 11) & 4095，即 mid 下挂的是哪棵 Leaf）是两回事。
+        m.set(0, &s0);              // 最小页号；叶下标 0、槽位下标 0
+        m.set(base - 1, &s1);       // 叶边界前一页；叶下标 0、槽位下标 2047
+        m.set(base, &s2);           // 叶边界后一页；叶下标 1、槽位下标 0（与 s0 同槽位、不同叶）
         m.set(midBase - 1, &s3);    // Mid 边界前一页
         m.set(midBase, &s4);        // Mid 边界后一页
         m.set(last, &s5);           // 最大合法页号
 
         Check(m.get(10) == &a && m.get(11) == &a, "T19 同叶多页");
-        Check(m.get(0) == &s0 && m.get(base) == &s2, "T20 叶下标相同的两个边界页各归其主");
+        Check(m.get(0) == &s0 && m.get(base) == &s2, "T20 槽位下标相同的两个边界页各归其主");
         Check(m.get(base - 1) == &s1, "T21 跨叶边界前一页（16MB）");
         Check(m.get(base) == &s2, "T22 跨叶边界后一页（16MB）");
         Check(m.get(midBase - 1) == &s3, "T23 跨 Mid 边界前一页（64GB）");

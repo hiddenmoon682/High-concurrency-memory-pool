@@ -42,6 +42,11 @@ class PageMap
 {
 public:
     static const int BITS = 35;
+    // (k >> BITS) 这类守卫要求 PAGE_ID 的位宽严格大于 BITS：
+    // 32 位构建下 PAGE_ID 只有 32 位，右移 35 位是未定义行为。
+    // 这里把"本映射要求 64 位页号"变成编译期错误，而不是留一处 UB。
+    static_assert(sizeof(PAGE_ID) * 8 > (size_t)BITS,
+                  "PageMap 的三层基数树要求 PAGE_ID 宽于 35 位（需要 64 位页号）");
     static const int INTERIOR_BITS = (BITS + 2) / 3;             // 12
     static const int LEAF_BITS = BITS - 2 * INTERIOR_BITS;       // 11
     static const int INTERIOR_LENGTH = 1 << INTERIOR_BITS;       // 4096
@@ -191,7 +196,7 @@ public:
         std::lock_guard<std::mutex> lock(_mtx);
         // 同基数树实现：start + i 越过 2^35 页号边界时跳过。
         // 这里以**完整页号**为键，回绕出的 2^35+k 与任何范围内页号都是不同的键，
-        // 所以这条跳过语句不改变可观测行为（实测见 task-7-report.md）。
+        // 所以这条跳过语句不改变可观测行为：即使去掉它，erase 也只是空操作。
         // 它保证的是语义确定：越界页不会被当成"已清理"，两种实现在越界区间上行为一致。
         // 35 的来历见 set() 的注释。
         for (size_t i = 0; i < n; ++i)
