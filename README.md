@@ -96,6 +96,9 @@ g++ -o align_test AlignTest.cc -std=c++11
 g++ -o page_map_test PageMapTest.cc -std=c++11 && ./page_map_test
 g++ -o page_map_test_hash PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./page_map_test_hash
 
+# 多线程混合尺寸压力测试
+g++ -O2 -o stress_test StressTest.cc -std=c++11 && ./stress_test
+
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
 make                  # 产物 Objectpool
@@ -121,6 +124,7 @@ make                  # 产物 Objectpool
 │   ├── UnitTest.hpp              #   单元测试
 │   ├── PageMapTest.cc            #   页映射单元测试（独立 main）
 │   ├── AlignTest.cc              #   不变量与回归测试（对齐/桶号/span/大块合并/边界）
+│   ├── StressTest.cc             #   多线程混合尺寸压力测试（独立 main）
 │   ├── BenchMark.cc              #   性能基准（vs malloc）
 │   ├── main.cc                   #   测试入口
 │   └── Log/                      #   日志模块
