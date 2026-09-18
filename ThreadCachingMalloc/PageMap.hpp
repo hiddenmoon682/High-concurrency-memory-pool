@@ -16,6 +16,14 @@
 #include <new>
 #include <unordered_map>
 
+// 两种实现都要求 PAGE_ID 宽于 35 位（2^35 页 * 8KB = 256TB，已超出 x64 用户态上限）：
+//   * 基数树实现用 (k >> BITS) 做越界守卫；
+//   * 对照实现用字面量 (k >> 35) 做同样的守卫。
+// 若 PAGE_ID 只有 32 位（32 位构建），这两处右移量都超过类型宽度、是**未定义行为**。
+// 这里把它变成编译期错误，而不是留一处 UB。BITS 只在基数树分支里存在，所以这里用字面量。
+static_assert(sizeof(PAGE_ID) * 8 > 35,
+              "PageMap 要求 PAGE_ID 宽于 35 位（需要 64 位页号）");
+
 #if TC_USE_RADIX_PAGEMAP
 
 // 三层基数树：页号 -> Span*
@@ -42,11 +50,8 @@ class PageMap
 {
 public:
     static const int BITS = 35;
-    // (k >> BITS) 这类守卫要求 PAGE_ID 的位宽严格大于 BITS：
-    // 32 位构建下 PAGE_ID 只有 32 位，右移 35 位是未定义行为。
-    // 这里把"本映射要求 64 位页号"变成编译期错误，而不是留一处 UB。
-    static_assert(sizeof(PAGE_ID) * 8 > (size_t)BITS,
-                  "PageMap 的三层基数树要求 PAGE_ID 宽于 35 位（需要 64 位页号）");
+    // 移位量必须小于 PAGE_ID 的位宽：该前提由文件顶部那条 static_assert 统一保证
+    // （它对两种实现都生效，因为对照实现用的是字面量 35）。
     static const int INTERIOR_BITS = (BITS + 2) / 3;             // 12
     static const int LEAF_BITS = BITS - 2 * INTERIOR_BITS;       // 11
     static const int INTERIOR_LENGTH = 1 << INTERIOR_BITS;       // 4096
@@ -185,7 +190,8 @@ public:
         // 与基数树实现保持一致的越界防御。35 是基数树那侧 BITS 的字面量：
         // 2^35 页 * 8KB = 256TB，已在合法页号范围之外。mode 0 下没有 BITS 可用
         // （那组常量只在 #if 分支里），所以这里写字面量并说明来历。
-        // 注：PAGE_ID 最大 64 位无符号，移位量 35 合法且不回绕，断言是有效的。
+        // 移位量 35 小于 PAGE_ID 位宽这一前提，由文件顶部那条 static_assert 保证
+        // （它对两种实现都生效）；因此这里的移位不是 UB，断言是有效的。
         assert((k >> 35) == 0);
         std::lock_guard<std::mutex> lock(_mtx);
         _map[k] = v;

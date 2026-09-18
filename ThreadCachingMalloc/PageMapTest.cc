@@ -89,9 +89,10 @@ int main()
         m.clearRange(2047, 2);
         Check(m.get(2047) == nullptr && m.get(2048) == nullptr, "T13 clearRange 跨叶清理两页");
         Check(m.nodesAllocated() == before, "T14 clearRange 跨叶不分配节点");
-        // 跨 Mid：2^23-1 与 2^23 同样只相差 1 页，但 mid 下标 = (k >> 23) & 4095 从 0 变成 1；
-        // 两页落在各自的 mid 节点里，且槽位下标同为 2047（与页 0 的槽位相同），
-        // 刚好覆盖"不同 mid、同槽位"这条最容易写错的路径。
+        // 跨 Mid：2^23-1 与 2^23 同样只相差 1 页，但正好落在 Mid 边界两侧。
+        // mid 下标 = (k >> 23) & 4095 从 0 变成 1，所以两页进的是两棵不同的 Mid 节点；
+        // 这也是这一对真正覆盖的东西：**跨 Mid 节点**。
+        // (附带事实，非覆盖声明：叶下标 4095 -> 0，槽位下标 2047 -> 0。)
         const PAGE_ID midBase = (PAGE_ID)1 << SPEC_SHIFT1;
         m.set(midBase - 1, &a);
         m.set(midBase, &b);
@@ -144,8 +145,8 @@ int main()
 
         m.set(10, &a);
         m.set(11, &a);
-        // 说明：下面口中的"槽位下标"指 Leaf::values 的下标 = k & (LEAF_LENGTH-1)，
-        // 与"叶下标"（(k >> 11) & 4095，即 mid 下挂的是哪棵 Leaf）是两回事。
+        // 术语约定：下文所说的"槽位下标"指 Leaf::values 的下标 = k & (LEAF_LENGTH-1)；
+        // "叶下标"指 (k >> 11) & 4095，即 mid 下挂的是哪一棵 Leaf。两者不是一回事。
         m.set(0, &s0);              // 最小页号；叶下标 0、槽位下标 0
         m.set(base - 1, &s1);       // 叶边界前一页；叶下标 0、槽位下标 2047
         m.set(base, &s2);           // 叶边界后一页；叶下标 1、槽位下标 0（与 s0 同槽位、不同叶）
