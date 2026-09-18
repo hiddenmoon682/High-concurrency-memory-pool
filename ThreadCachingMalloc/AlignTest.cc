@@ -13,6 +13,8 @@
 //   T6  真实分配的地址 16 字节对齐，且块之间互不覆盖（canary 花纹校验）；
 //   T8  span 末块不得越出 span（活块间距检测 + 按整块大小写入花纹校验）；
 //   T9  大块（>256KB）相邻分配/释放：释放后的存活块不得被误合并、被覆盖；
+//   T10 Span 被合并回收后，映射里不得残留指向它的悬垂条目（反复 split/merge 20 轮）；
+//   T10b >1MB（>128 页）的"直接还给系统"释放分支同样不得残留悬垂条目；
 //   T7  MAX_BYTES 边界（对齐后正好 256KB）可申请可释放 —— 必须放在最后，
 //       因为修复前它会触发 assert 直接 abort，后面的用例就没机会跑了。
 
@@ -498,6 +500,146 @@ static void TestLargeBlockAdjacentFree()
     }
 }
 
+// T10: Span 被合并回收后，映射里不得残留指向它的条目
+// 序列：A、B 相邻大块 -> 释放 A（进页缓存）-> 释放 B（向前合并，A 的 Span 被回收）
+//       -> 再申请与 A 另一侧相邻的 D 并释放（这一步在旧实现里可能命中已回收的 A）
+// 守护的缺陷：替换前的实现只在合并后的首/尾页更新映射，被吸收区间里的"内部页"
+// 仍然指向已经 _spanPool.Delete 掉的 Span。本次实测（见 task-5-report.md 的 Step 3）：
+// 本用例在替换前的实现上同样通过，因此它**不能**证明"陈旧映射已被修复"，
+// 它守的是"合并/切分反复发生时不出现覆盖与重叠"这条行为不变量。原因是删除后
+// 内部页条目虽然悬垂，但真正被读到的那几个页边界都会立刻被重写（切分路径会
+// 给 kSpan 的每一页重新 set）。
+static void TestStaleMapAfterMerge()
+{
+    const size_t SZ = 300000;   // 37 页，>256KB 且 <=128 页，走的正是会合并的路径
+
+    for (int round = 0; round < 20; ++round)
+    {
+        std::vector<uintptr_t> v;
+        for (size_t i = 0; i < 6; ++i)
+        {
+            v.push_back(reinterpret_cast<uintptr_t>(ConcurrentAlloc(SZ)));
+        }
+        for (size_t i = 0; i < 6; ++i)
+        {
+            memset(reinterpret_cast<void*>(v[i]), (unsigned char)(0xB0 + i), SZ);
+        }
+
+        // 释放 0、2、4：其中若干次会触发"活块被误判/被合并"的旧路径
+        for (size_t i = 0; i < 6; i += 2)
+        {
+            ConcurrentFree(reinterpret_cast<void*>(v[i]));
+        }
+        // 再申请同尺寸，迫使页缓存切分/合并反复发生
+        std::vector<uintptr_t> w;
+        for (size_t i = 0; i < 3; ++i)
+        {
+            w.push_back(reinterpret_cast<uintptr_t>(ConcurrentAlloc(SZ)));
+            memset(reinterpret_cast<void*>(w[i]), 0x5C, SZ);
+        }
+
+        size_t corrupted = 0;
+        size_t overlapped = 0;
+        for (size_t i = 1; i < 6; i += 2)
+        {
+            const unsigned char want = (unsigned char)(0xB0 + i);
+            const unsigned char* p = reinterpret_cast<const unsigned char*>(v[i]);
+            for (size_t b = 0; b < SZ; ++b)
+            {
+                if (p[b] != want) { ++corrupted; break; }
+            }
+            for (size_t j = 0; j < w.size(); ++j)
+            {
+                if (v[i] < w[j] + SZ && w[j] < v[i] + SZ) ++overlapped;
+            }
+        }
+        for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
+
+        if (corrupted != 0 || overlapped != 0)
+        {
+            ++g_failed;
+            printf("  FAIL  T10 第 %d 轮：%zu 个存活块被覆盖，%zu 对重叠\n", round, corrupted, overlapped);
+            return;
+        }
+    }
+
+    ++g_passed;
+    printf("  PASS  T10 合并回收后映射无残留（20 轮）\n");
+}
+
+// T10b: 覆盖 >1MB（>128 页）那条"直接还给系统"的释放路径
+// Task 3 的审查指出：ReleaseSpanToPageCache 里 span->_n > NPAGES-1 分支的
+// clearRange 没有被任何已执行用例覆盖 —— 现有大块用例最大只到 300000 字节
+// （37 页），而只有 >128 页才会进这条分支。这里每次都释放 147 页的块。
+// 判据与 T9/T10 一致：存活块花纹必须完好，且存活块与复用块不得重叠。
+// 注意只对"存活块 vs 新块"做重叠判定：已释放的块被下一次同尺寸申请按原地址
+// 复用是 SystemFree 的正常行为，不是缺陷。
+static void TestStaleMapLargeSpan()
+{
+    const size_t SZ = 1200000;   // > 1MB，对齐后 1204224 字节 = 147 页 > 128 页
+    const size_t N = 6;
+    printf("        T10b 大块 %zu 字节（对齐后 %zu = %zu 页）走直接还系统分支\n",
+           SZ, SizeClass::RoundUp(SZ), SizeClass::RoundUp(SZ) >> PAGE_SHIFT);
+
+    std::vector<uintptr_t> v;
+    v.reserve(N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        v.push_back(reinterpret_cast<uintptr_t>(ConcurrentAlloc(SZ)));
+        memset(reinterpret_cast<void*>(v[i]), (unsigned char)(0xC0 + i), SZ);
+    }
+
+    // 释放偶数号：这一步走的就是 >128 页的"直接还系统"分支
+    for (size_t i = 0; i < N; i += 2)
+    {
+        ConcurrentFree(reinterpret_cast<void*>(v[i]));
+    }
+
+    // 再申请同尺寸，迫使这段地址被复用
+    std::vector<uintptr_t> w;
+    for (size_t i = 0; i < N / 2; ++i)
+    {
+        w.push_back(reinterpret_cast<uintptr_t>(ConcurrentAlloc(SZ)));
+        memset(reinterpret_cast<void*>(w[i]), 0x7E, SZ);
+    }
+
+    // 存活块（奇数号）花纹必须完好
+    size_t corrupted = 0;
+    for (size_t i = 1; i < N; i += 2)
+    {
+        const unsigned char want = (unsigned char)(0xC0 + i);
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(v[i]);
+        for (size_t b = 0; b < SZ; ++b)
+        {
+            if (p[b] != want) { ++corrupted; break; }
+        }
+    }
+
+    // 存活块与"释放后重新申请"的块不能重叠
+    size_t overlapped = 0;
+    for (size_t i = 1; i < N; i += 2)
+    {
+        for (size_t j = 0; j < w.size(); ++j)
+        {
+            if (v[i] < w[j] + SZ && w[j] < v[i] + SZ) ++overlapped;
+        }
+    }
+
+    for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
+    for (size_t i = 1; i < N; i += 2) ConcurrentFree(reinterpret_cast<void*>(v[i]));
+
+    if (corrupted == 0 && overlapped == 0)
+    {
+        ++g_passed;
+        printf("  PASS  T10b >1MB 释放路径：存活块花纹完好且未被复用块重叠\n");
+    }
+    else
+    {
+        ++g_failed;
+        printf("  FAIL  T10b >1MB 释放路径：%zu 个存活块被覆盖，%zu 对重叠\n", corrupted, overlapped);
+    }
+}
+
 // T7: 对齐后正好等于 MAX_BYTES 的请求也必须能申请、能释放
 static void TestMaxBytesBoundary()
 {
@@ -537,6 +679,8 @@ int main()
     TestAllocationAlignmentAndCanary();
     TestSpanTailNoOverrun();
     TestLargeBlockAdjacentFree();   // 修复前会崩溃
+    TestStaleMapAfterMerge();       // T10：合并回收后映射不得残留悬垂 Span*
+    TestStaleMapLargeSpan();        // T10b：>1MB 直接还系统分支
     TestMaxBytesBoundary();         // 必须最后：修复前这一项会 abort
 
     printf("\n结果：%d 项通过，%d 项失败\n", g_passed, g_failed);
