@@ -7,7 +7,26 @@
 class PageCache
 {
 private:
-    SpanList _spanLists[NPAGES];        // 哈希桶
+    // 页缓存的核心：按"页数"分桶的双向链表数组，下标就是桶内所有 Span 的页数 _n。
+    // 1 页 = 2^PAGE_SHIFT = 8KB，所以下标读作"这块内存占几页"：
+    //   _spanLists[0]    恒为空：不存在 0 页的 Span（NewSpan 里有 assert(k > 0)）。
+    //                    留着下标 0 只是为了让"下标 == 页数"直接成立，省掉 ±1 换算。
+    //   _spanLists[1]    1 页 = 8KB 的 Span，是最小单位
+    //   _spanLists[k]    k 页的 Span，k ∈ [1, 128]
+    //   _spanLists[128]  128 页 = 1MB，本类能管理的最大的 Span；
+    //                    库存见底时 NewSpan 正是按 SystemAlloc(NPAGES - 1) 向系统要这个尺寸
+    // 为什么最大只到 128 页：数组长度 NPAGES = 128 + 1，下标 129 及以上不存在。
+    //   超过 128 页（> 1MB）的请求不进桶管理 —— NewSpan 直接 SystemAlloc，
+    //   ReleaseSpanToPageCache 直接 SystemFree 还给系统。
+    // 分配（NewSpan）怎么用这些桶：先看 _spanLists[k]；没有再往【更大】的桶扫描，
+    //   找到就从它的头部切出 k 页（切剩的部分挂回 _spanLists[剩余页数]）；
+    //   都没有就向系统要 128 页放进 [128]，再递归切分。
+    // 释放（ReleaseSpanToPageCache）怎么用：先与相邻的空闲 Span 合并成更大的整块，
+    //   再挂回 _spanLists[合并后的页数]，这样以后才能满足更大的页数请求。
+    // 与 CentralCache::_spanLists[NFREELIST] 的区别：那个按"对象大小"分桶（200 个），
+    //   这个按"页数"分桶（129 个）。另外这里整个类共用一把 _pageMtx，
+    //   所以 SpanList 自带的 _mtx 在 PageCache 中并不使用（它是给 CentralCache 当桶锁的）。
+    SpanList _spanLists[NPAGES];        // 哈希桶：下标 = 页数
     std::unordered_map<PAGE_ID, Span*> _idSpanMap; // 页号到SPan的映射，用于内存回收
     ObjectPool<Span> _spanPool;
 private:

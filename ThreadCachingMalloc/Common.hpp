@@ -42,6 +42,9 @@ typedef unsigned long long PAGE_ID;
 
 static const size_t MAX_BYTES = 256 * 1024;
 static const size_t NFREELIST = 200;
+// PageCache 页数桶的个数：合法下标 0..128，下标本身就是该桶里 Span 的页数。
+// 取 129 = 128 + 1，是为了让下标 128（128 页 = 1MB，单个 Span 的上限）合法；
+// 0 号桶在本实现中恒为空（没有 0 页的 Span），留着只是让"下标 == 页数"直接成立。
 static const size_t NPAGES = 129;
 static const size_t PAGE_SHIFT = 13; // 8 * 1024 Byte = 8 KB = 2^13 Byte
 
