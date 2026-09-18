@@ -81,40 +81,45 @@
 
 ## 三、构建与运行
 
-环境：g++（C++11），无需第三方依赖。所有测试程序都在 `ThreadCachingMalloc/tests/` 下，
+环境：g++（C++11），无需第三方依赖。测试程序都在 `ThreadCachingMalloc/tests/` 下，
 它们用 `#include "../xxx.hpp"` 引用库头文件，因此**从哪个目录编译都一样**（下面统一在 `ThreadCachingMalloc/` 下执行）。
+**编译产物统一输出到各子项目的 `bin/`**（已被 `.gitignore` 忽略，可随时删除重建），源码目录不残留二进制。
 
 ```bash
 # 高并发内存池 —— 性能基准（对比系统 malloc）
 cd ThreadCachingMalloc
-make                  # 产物 tcmalloc
-./tcmalloc
+make                  # 产物 bin/tcmalloc
+./bin/tcmalloc
 
 # 高并发内存池 —— 单元测试（TLStest）
-g++ -o gtcmalloc tests/main.cc -std=c++11
-./gtcmalloc
+g++ -o bin/gtcmalloc tests/main.cc -std=c++11
+./bin/gtcmalloc
 
 # 高并发内存池 —— 对齐与桶号一致性测试
-g++ -o align_test tests/AlignTest.cc -std=c++11
-./align_test          # 退出码 0 表示全部通过
+g++ -o bin/align_test tests/AlignTest.cc -std=c++11
+./bin/align_test          # 退出码 0 表示全部通过
 
 # 页映射单元测试（两种实现各跑一遍）
-g++ -o page_map_test tests/PageMapTest.cc -std=c++11 && ./page_map_test
-g++ -o page_map_test_hash tests/PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./page_map_test_hash
+g++ -o bin/page_map_test tests/PageMapTest.cc -std=c++11 && ./bin/page_map_test
+g++ -o bin/page_map_test_hash tests/PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./bin/page_map_test_hash
 
 # 多线程混合尺寸压力测试（两种实现各跑一遍）
-g++ -O2 -o stress_test tests/StressTest.cc -std=c++11 && ./stress_test
-g++ -O2 -o stress_test_hash tests/StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./stress_test_hash
+g++ -O2 -o bin/stress_test tests/StressTest.cc -std=c++11 && ./bin/stress_test
+g++ -O2 -o bin/stress_test_hash tests/StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./bin/stress_test_hash
 
 # 页映射性能探针（README 那张表的来源，两种实现各跑一遍）
-g++ -O2 -o _perf_radix tests/PerfProbe.cc -std=c++11 && ./_perf_radix
-g++ -O2 -o _perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./_perf_hash
+g++ -O2 -o bin/_perf_radix tests/PerfProbe.cc -std=c++11 && ./bin/_perf_radix
+g++ -O2 -o bin/_perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./bin/_perf_hash
 
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
-make                  # 产物 Objectpool
-./Objectpool
+make                  # 产物 bin/Objectpool
+./bin/Objectpool
 ```
+
+首条命令前需保证 `bin/` 存在；`make` 会自动创建（它带 `bin` 这个 order-only 前置），
+用 `g++` 直接编译时先 `mkdir bin`（或改用 Makefile）。`make clean` 是 `rm -rf bin`，需要 Unix shell；
+Windows 的 `mingw32-make` 下请手动删除 `bin/`。
 
 基准测试参数（`tests/BenchMark.cc`）：4 线程、每轮 1000 次 16 字节申请+释放、共 10 轮，
 输出内存池与 `malloc` 各自的耗时（ms）。注意它的 `malloc` 一侧**恒打印 0 ms**——
@@ -129,9 +134,9 @@ make                  # 产物 Objectpool
 单位 ns/op，`g++ -O2 -std=c++11`。复现命令（在 `ThreadCachingMalloc/` 下执行）：
 
 ```
-g++ -O2 -o _perf_radix tests/PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1，不加 -D）
-g++ -O2 -o _perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
-./_perf_radix ; ./_perf_hash
+g++ -O2 -o bin/_perf_radix tests/PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1，不加 -D）
+g++ -O2 -o bin/_perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
+./bin/_perf_radix ; ./bin/_perf_hash
 ```
 
 | 线程数 | 基数树 alloc | 基数树 free | unordered_map alloc | unordered_map free |
@@ -165,7 +170,7 @@ alloc 一侧同样受益，但只体现在**多线程**：2 线程 17.6→12.4�
 │   ├── PageMap.hpp               #   基数树页号映射（三层，节点惰性分配）
 │   ├── ObjectPool.hpp            #   定长对象池（内部对象分配）
 │   ├── Common.hpp                #   公共定义（Span/SizeClass/FreeList）
-│   ├── Makefile                  #   构建基准程序（make -> tcmalloc）
+│   ├── Makefile                  #   构建基准程序（make -> bin/tcmalloc）
 │   ├── tests/                    #   测试程序（各自独立 main，用 ../ 引用库头文件）
 │   │   ├── main.cc               #     测试入口（TLStest）
 │   │   ├── UnitTest.hpp          #     单元测试用例
@@ -174,11 +179,13 @@ alloc 一侧同样受益，但只体现在**多线程**：2 线程 17.6→12.4�
 │   │   ├── StressTest.cc         #     多线程混合尺寸压力测试
 │   │   ├── PerfProbe.cc          #     页映射性能探针（README 那几张表的来源）
 │   │   └── BenchMark.cc          #     性能基准（vs malloc）
+│   ├── bin/                      #   编译产物（gitignore；可随时删除重建）
 │   └── Log/                      #   日志模块
 └── Fixed_length_memory_pool/     # 定长内存池（前置练习）
     ├── Objectpool.hpp            #   ObjectPool<T> 模板
     ├── main.cc                   #   性能对比用例
-    └── Makefile
+    ├── Makefile                  #   构建（make -> bin/Objectpool）
+    └── bin/                      #   编译产物（gitignore）
 ```
 
 ---

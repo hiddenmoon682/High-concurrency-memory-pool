@@ -1,6 +1,6 @@
 // StressTest.cc —— 多线程混合尺寸压力测试（独立 main）
-// 编译：g++ -O2 -o stress_test tests/StressTest.cc -std=c++11
-// 对照：g++ -O2 -o stress_test_hash tests/StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0
+// 编译：g++ -O2 -o bin/stress_test tests/StressTest.cc -std=c++11
+// 对照：g++ -O2 -o bin/stress_test_hash tests/StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0
 
 #include "../ConcurrentAlloc.hpp"
 

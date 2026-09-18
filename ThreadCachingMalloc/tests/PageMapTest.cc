@@ -1,6 +1,6 @@
 // PageMapTest.cc —— 页号->Span 映射的单元测试（独立 main）
-// 编译（基数树）：g++ -o page_map_test tests/PageMapTest.cc -std=c++11
-// 编译（对照）  ：g++ -o page_map_test_hash tests/PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0
+// 编译（基数树）：g++ -o bin/page_map_test tests/PageMapTest.cc -std=c++11
+// 编译（对照）  ：g++ -o bin/page_map_test_hash tests/PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0
 
 #include "../PageMap.hpp"
 

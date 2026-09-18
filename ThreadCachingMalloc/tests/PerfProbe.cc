@@ -2,9 +2,9 @@
 //
 // 这是 Task 7 用来产出 README「页映射替换前后」那张表的探针，固化进仓库以便复现。
 // 用法（在 ThreadCachingMalloc 目录下；本文件用 ../ 引用库头文件，故从任何目录编译都一样）：
-//   g++ -O2 -o _perf_radix tests/PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1）
-//   g++ -O2 -o _perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
-//   ./_perf_radix ; ./_perf_hash
+//   g++ -O2 -o bin/_perf_radix tests/PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1）
+//   g++ -O2 -o bin/_perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
+//   ./bin/_perf_radix ; ./bin/_perf_hash
 //
 // 口径：每线程先预热 10 万次申请/释放，再分别计时一轮 10 万次申请与一轮 10 万次释放；
 // 输出"线程内平均延迟" = 各线程耗时之和 ÷ 总操作数，单位 ns/op。

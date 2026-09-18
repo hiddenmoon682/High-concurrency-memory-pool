@@ -1,8 +1,8 @@
 // AlignTest.cc —— 尺寸分类第一档对齐粒度（8B -> 16B）的行为测试
 //
 // 编译运行：
-//   g++ -o align_test tests/AlignTest.cc -std=c++11
-//   ./align_test          退出码 0 表示全部通过
+//   g++ -o bin/align_test tests/AlignTest.cc -std=c++11
+//   ./bin/align_test          退出码 0 表示全部通过
 //
 // 覆盖的不变量：
 //   T1  RoundUp(s) 必须是 16 的倍数，且不小于请求值 s；
