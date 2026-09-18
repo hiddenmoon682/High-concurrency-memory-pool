@@ -10,6 +10,7 @@
 #include "Common.hpp"
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <mutex>
 #include <new>
@@ -29,7 +30,7 @@
 //   * set() / clearRange() 必须由调用方持有 PageCache::_pageMtx。
 //   * 不变量：某页的映射只在这块内存尚未交给调用者时才可能改变；
 //     一旦交出去，在该内存活着期间映射绝不再改。因此免锁读是安全的。
-//   * 写用 release、读用 relaxed：x86-64 上都是普通 MOV，不产生额外指令。
+//   * 写用 release、读用 acquire：x86-64 上都是普通 MOV，不产生额外指令。
 class PageMap
 {
 public:
@@ -55,11 +56,11 @@ public:
     Span* get(PAGE_ID k) const
     {
         if ((k >> BITS) != 0) return nullptr;
-        const Mid* mid = _top->kids[(k >> SHIFT1) & (INTERIOR_LENGTH - 1)].load(std::memory_order_relaxed);
+        const Mid* mid = _top->kids[(k >> SHIFT1) & (INTERIOR_LENGTH - 1)].load(std::memory_order_acquire);
         if (mid == nullptr) return nullptr;
-        const Leaf* leaf = mid->kids[(k >> SHIFT2) & (INTERIOR_LENGTH - 1)].load(std::memory_order_relaxed);
+        const Leaf* leaf = mid->kids[(k >> SHIFT2) & (INTERIOR_LENGTH - 1)].load(std::memory_order_acquire);
         if (leaf == nullptr) return nullptr;
-        return leaf->values[k & (LEAF_LENGTH - 1)].load(std::memory_order_relaxed);
+        return leaf->values[k & (LEAF_LENGTH - 1)].load(std::memory_order_acquire);
     }
 
     void set(PAGE_ID k, Span* v)
@@ -67,6 +68,22 @@ public:
         assert((k >> BITS) == 0);
         Leaf* leaf = EnsureLeaf(k);
         leaf->values[k & (LEAF_LENGTH - 1)].store(v, std::memory_order_release);
+    }
+
+    // 清理右开区间 [start, start+n)。只碰已存在的节点，绝不分配节点：
+    // 清理一个从未触及的地址区间必须是零成本空操作。
+    void clearRange(PAGE_ID start, size_t n)
+    {
+        for (size_t i = 0; i < n; ++i)
+        {
+            const PAGE_ID k = start + i;
+            if ((k >> BITS) != 0) continue;
+            const Mid* mid = _top->kids[(k >> SHIFT1) & (INTERIOR_LENGTH - 1)].load(std::memory_order_relaxed);
+            if (mid == nullptr) continue;
+            const Leaf* leaf = mid->kids[(k >> SHIFT2) & (INTERIOR_LENGTH - 1)].load(std::memory_order_relaxed);
+            if (leaf == nullptr) continue;
+            const_cast<Leaf*>(leaf)->values[k & (LEAF_LENGTH - 1)].store(nullptr, std::memory_order_release);
+        }
     }
 
     size_t nodesAllocated() const { return _nodes; }

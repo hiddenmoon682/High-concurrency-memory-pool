@@ -50,6 +50,55 @@ int main()
     }
 #endif
 
+    {
+        PageMap m;
+        Span a;
+        m.set(100, &a);
+        m.set(101, &a);
+        m.clearRange(100, 1);
+        Check(m.get(100) == nullptr, "T8 clearRange 清掉首元素");
+        Check(m.get(101) == &a, "T9 clearRange 不越界清理（右开区间）");
+        m.clearRange(101, 2);
+        Check(m.get(101) == nullptr, "T10 clearRange 覆盖起点");
+    }
+
+#if TC_USE_RADIX_PAGEMAP
+    {
+        PageMap m;
+        Span a;
+        const size_t before = m.nodesAllocated();
+        m.clearRange(5000, 4096);            // 从未 set 过的区间
+        Check(m.nodesAllocated() == before, "T11 clearRange 不分配节点");
+    }
+#endif
+
+    {
+        PageMap m;
+        Span a;
+        // 同叶内两个不同页
+        m.set(10, &a);
+        m.set(11, &a);
+        // 跨叶边界：相差 1<<LEAF_BITS(11) = 2048 页 = 16MB
+        const PAGE_ID base = (PAGE_ID)1 << SPEC_LEAF_BITS;
+        m.set(base - 1, &a);
+        m.set(base, &a);
+        // 跨 Mid 边界：相差 1<<SHIFT1(23) = 64GB
+        const PAGE_ID midBase = (PAGE_ID)1 << SPEC_SHIFT1;
+        m.set(midBase - 1, &a);
+        m.set(midBase, &a);
+        // 边界页号
+        const PAGE_ID last = ((PAGE_ID)1 << SPEC_BITS) - 1;
+        m.set(0, &a);
+        m.set(last, &a);
+
+        Check(m.get(10) == &a && m.get(11) == &a, "T12 同叶多页");
+        Check(m.get(base - 1) == &a && m.get(base) == &a, "T13 跨叶边界（16MB）");
+        Check(m.get(midBase - 1) == &a && m.get(midBase) == &a, "T14 跨 Mid 边界（64GB）");
+        Check(m.get(0) == &a, "T15 页号 0");
+        Check(m.get(last) == &a, "T16 最大页号 2^35-1");
+        Check(m.get((PAGE_ID)1 << SPEC_BITS) == nullptr, "T17 越界页号返回 nullptr");
+    }
+
     printf("\n结果：%d 项通过，%d 项失败\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }
