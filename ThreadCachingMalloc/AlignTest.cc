@@ -21,6 +21,7 @@
 #include "ConcurrentAlloc.hpp"
 
 #include <algorithm>
+#include <cassert>     // 直接包含：T10b 的分支自证 assert 不依赖 Common.hpp 的传递包含
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -539,7 +540,9 @@ static void TestStaleMapAfterMerge()
             memset(reinterpret_cast<void*>(w[i]), 0x5C, SZ);
         }
 
-        size_t corrupted = 0;
+        // 存活块与新块分开计数：合并成一个"块花纹异常"说不清是哪一组出的问题。
+        size_t corruptLive = 0;   // 存活块（v 的奇数号）花纹异常数
+        size_t corruptNew = 0;    // 新块（w）花纹异常数
         size_t overlapped = 0;
 
         // 存活块：花纹完好，且不与任何新块重叠
@@ -549,7 +552,7 @@ static void TestStaleMapAfterMerge()
             const unsigned char* p = reinterpret_cast<const unsigned char*>(v[i]);
             for (size_t b = 0; b < SZ; ++b)
             {
-                if (p[b] != want) { ++corrupted; break; }
+                if (p[b] != want) { ++corruptLive; break; }
             }
             for (size_t j = 0; j < w.size(); ++j)
             {
@@ -564,7 +567,7 @@ static void TestStaleMapAfterMerge()
             const unsigned char* p = reinterpret_cast<const unsigned char*>(w[i]);
             for (size_t b = 0; b < SZ; ++b)
             {
-                if (p[b] != 0x5C) { ++corrupted; break; }
+                if (p[b] != 0x5C) { ++corruptNew; break; }
             }
             for (size_t j = i + 1; j < w.size(); ++j)
             {
@@ -574,10 +577,11 @@ static void TestStaleMapAfterMerge()
 
         for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
 
-        if (corrupted != 0 || overlapped != 0)
+        if (corruptLive != 0 || corruptNew != 0 || overlapped != 0)
         {
             ++g_failed;
-            printf("  FAIL  T10 第 %d 轮：%zu 个块花纹异常，%zu 对重叠\n", round, corrupted, overlapped);
+            printf("  FAIL  T10 第 %d 轮：存活块花纹异常 %zu 个，新块花纹异常 %zu 个，重叠 %zu 对\n",
+                   round, corruptLive, corruptNew, overlapped);
             return;
         }
     }
@@ -593,9 +597,11 @@ static void TestStaleMapAfterMerge()
 // Task 3 的审查指出：ReleaseSpanToPageCache 里 span->_n > NPAGES-1 分支的
 // clearRange 没有被任何已执行用例覆盖 —— 现有大块用例最大只到 300000 字节
 // （37 页），而只有 >128 页才会进这条分支。这里每次都释放 147 页的块。
-// 判据与 T9/T10 一致：存活块花纹必须完好，且存活块与复用块不得重叠。
-// 注意只对"存活块 vs 新块"做重叠判定：已释放的块被下一次同尺寸申请按原地址
-// 复用是 SystemFree 的正常行为，不是缺陷。
+// 判据与 T9/T10 一致：存活块花纹必须完好、存活块与新建块不得重叠，
+// 并且新建块自身也要回读花纹、彼此不得重叠（否则"同一次分配把同一块
+// 发给两个新块"会静默通过）。
+// 注意只对"存活块 vs 新块"和"新块之间"做重叠判定：已释放的块被下一次同尺寸
+// 申请按原地址复用是 SystemFree 的正常行为，不是缺陷。
 static void TestStaleMapLargeSpan()
 {
     const size_t SZ = 1200000;   // > 1MB，对齐后 1204224 字节 = 147 页 > 128 页
@@ -631,40 +637,57 @@ static void TestStaleMapLargeSpan()
         memset(reinterpret_cast<void*>(w[i]), 0x7E, SZ);
     }
 
-    // 存活块（奇数号）花纹必须完好
-    size_t corrupted = 0;
+    // 说明：本用例只有"存活块 vs 新块"和"新块之间"两种重叠判定。
+    // 已释放的块被下一次同尺寸申请按原地址复用是 SystemFree 的正常行为，
+    // 拿"被释放块"去和新块比重叠会假失败，所以不做那种比较。
+    // 与 T10 一致：存活块与新块分开计数，并各自回读花纹。
+    size_t corruptLive = 0;   // 存活块（v 的奇数号）花纹异常数
+    size_t corruptNew = 0;    // 新块（w）花纹异常数
+    size_t overlapped = 0;    // 重叠对数
+
+    // ① 存活块：花纹完好，且不与任何新块重叠
     for (size_t i = 1; i < N; i += 2)
     {
         const unsigned char want = (unsigned char)(0xC0 + i);
         const unsigned char* p = reinterpret_cast<const unsigned char*>(v[i]);
         for (size_t b = 0; b < SZ; ++b)
         {
-            if (p[b] != want) { ++corrupted; break; }
+            if (p[b] != want) { ++corruptLive; break; }
         }
-    }
-
-    // 存活块与"释放后重新申请"的块不能重叠
-    size_t overlapped = 0;
-    for (size_t i = 1; i < N; i += 2)
-    {
         for (size_t j = 0; j < w.size(); ++j)
         {
             if (v[i] < w[j] + SZ && w[j] < v[i] + SZ) ++overlapped;
         }
     }
 
+    // ② 新块自身：释放前逐个回读花纹（期望 0x7E），并做"新块之间"的重叠检查。
+    //    少了这两项，"同一次分配把同一块发给两个新块"会静默通过。
+    for (size_t i = 0; i < w.size(); ++i)
+    {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(w[i]);
+        for (size_t b = 0; b < SZ; ++b)
+        {
+            if (p[b] != 0x7E) { ++corruptNew; break; }
+        }
+        for (size_t j = i + 1; j < w.size(); ++j)
+        {
+            if (w[i] < w[j] + SZ && w[j] < w[i] + SZ) ++overlapped;
+        }
+    }
+
     for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
     for (size_t i = 1; i < N; i += 2) ConcurrentFree(reinterpret_cast<void*>(v[i]));
 
-    if (corrupted == 0 && overlapped == 0)
+    if (corruptLive == 0 && corruptNew == 0 && overlapped == 0)
     {
         ++g_passed;
-        printf("  PASS  T10b >1MB 释放路径：存活块花纹完好且未被复用块重叠\n");
+        printf("  PASS  T10b >1MB 释放路径：存活块与新块花纹完好、互不重叠\n");
     }
     else
     {
         ++g_failed;
-        printf("  FAIL  T10b >1MB 释放路径：%zu 个存活块被覆盖，%zu 对重叠\n", corrupted, overlapped);
+        printf("  FAIL  T10b >1MB 释放路径：存活块花纹异常 %zu 个，新块花纹异常 %zu 个，重叠 %zu 对\n",
+               corruptLive, corruptNew, overlapped);
     }
 }
 
@@ -707,8 +730,8 @@ int main()
     TestAllocationAlignmentAndCanary();
     TestSpanTailNoOverrun();
     TestLargeBlockAdjacentFree();   // 修复前会崩溃
-    TestStaleMapAfterMerge();       // T10：合并回收后映射不得残留悬垂 Span*
-    TestStaleMapLargeSpan();        // T10b：>1MB 直接还系统分支
+    TestStaleMapAfterMerge();       // T10：合并回收后存活块不得被覆盖/与新块重叠
+    TestStaleMapLargeSpan();        // T10b：>1MB 直接还系统分支，同上判据
     TestMaxBytesBoundary();         // 必须最后：修复前这一项会 abort
 
     printf("\n结果：%d 项通过，%d 项失败\n", g_passed, g_failed);
