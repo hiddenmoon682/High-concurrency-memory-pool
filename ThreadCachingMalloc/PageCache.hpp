@@ -2,6 +2,7 @@
 
 #include "Common.hpp"
 #include "ObjectPool.hpp"
+#include "PageMap.hpp"
 
 // PageCache 也是只能有一份，也要使用单例模式
 class PageCache
@@ -27,7 +28,7 @@ private:
     //   这个按"页数"分桶（129 个）。另外这里整个类共用一把 _pageMtx，
     //   所以 SpanList 自带的 _mtx 在 PageCache 中并不使用（它是给 CentralCache 当桶锁的）。
     SpanList _spanLists[NPAGES];        // 哈希桶：下标 = 页数
-    std::unordered_map<PAGE_ID, Span*> _idSpanMap; // 页号到SPan的映射，用于内存回收
+    PageMap _pageMap;                   // 页号 -> Span 的映射（免锁读，见 PageMap.hpp 的并发契约）
     ObjectPool<Span> _spanPool;
 private:
     PageCache()
@@ -60,19 +61,19 @@ public:
             span->_n = k;
 
             // 方便后续释放内存
-            _idSpanMap[span->_pageId] = span;
+            _pageMap.set(span->_pageId, span);
             return span;
         }
 
         // 先去对应的桶拿Span
         if (!_spanLists[k].Empty())
         {
-            // 给出Span的时候，也需要在_idSpanMap里缓存
+            // 给出Span的时候，也需要在页号映射里缓存
             Span* kSpan = _spanLists[k].PopFront();      // -----------------------
 
             for (PAGE_ID  i = 0; i < kSpan->_n; ++i)
             {
-                _idSpanMap[kSpan->_pageId + i] = kSpan;
+                _pageMap.set(kSpan->_pageId + i, kSpan);
             }
 
             return kSpan;
@@ -99,13 +100,13 @@ public:
                 _spanLists[nSpan->_n].PushFront(nSpan);
 
                 // 存储nSpan的首尾页号跟nSpan映射，方便page cache回收内存时进行的合并查找
-                _idSpanMap[nSpan->_pageId] = nSpan;
-                _idSpanMap[nSpan->_pageId + nSpan->_n - 1] = nSpan;
+                _pageMap.set(nSpan->_pageId, nSpan);
+                _pageMap.set(nSpan->_pageId + nSpan->_n - 1, nSpan);
 
                 // 建立页号和span的映射，方便将小块内存放回Span时查找span
                 for (PAGE_ID  i = 0; i < kSpan->_n; ++i)
                 {
-                    _idSpanMap[kSpan->_pageId + i] = kSpan;
+                    _pageMap.set(kSpan->_pageId + i, kSpan);
                 }
 
                 // 返回kSpan
@@ -129,26 +130,14 @@ public:
         return NewSpan(k);
     }
 
-    // 计算一个内存块应该属于哪个Span
+    // 免锁读：free 路径不再获取 _pageMtx（这正是本次替换的目的）。
+    // 安全性来自 PageMap.hpp 里写明的不变量：活跃内存对应的页映射不会再变。
     Span* MapObjectToSpan(void* obj)
     {
-        // 先计算页号
         PAGE_ID id = (PAGE_ID)obj >> PAGE_SHIFT;
-
-        std::unique_lock<std::mutex> lock(_pageMtx);
-
-        // 在_idSpanMap中去找
-        auto ret = _idSpanMap.find(id);
-        if (ret != _idSpanMap.end())
-        {
-            return ret->second;
-        }
-        else
-        {
-            // 正常情况下都找得到
-            assert(false);
-            return nullptr;
-        }
+        Span* span = _pageMap.get(id);
+        assert(span);
+        return span;
     }
 
     // 将Span挂回PageCache，但是由于Span有可能都被切成小块的，为了避免内存碎片
@@ -158,6 +147,7 @@ public:
         // 大于128页直接释放给堆
         if (span->_n > NPAGES - 1)
         {
+            _pageMap.clearRange(span->_pageId, span->_n);   // 否则首页条目成为悬垂指针
             void* ptr = (void*)(span->_pageId << PAGE_SHIFT);
             SystemFree(ptr);
 
@@ -173,16 +163,15 @@ public:
         {
             // 计算PageID
             PAGE_ID id = span->_pageId - 1;
-            // 在_idSpanMap中找对应的Span
-            auto ret = _idSpanMap.find(id);
+            // 在 _pageMap 中找对应的 Span
+            Span* prevSpan = _pageMap.get(id);
 
-            // 前面的页号没找到对应的Span，不合并
-            if (ret == _idSpanMap.end())
+            // 前面的页号没有对应的 Span（或已被清空），不合并
+            if (prevSpan == nullptr)
             {
                 break;
             }
 
-            Span* prevSpan = ret->second;
             // 前面的Span正在被使用，不合并
             if (prevSpan->_isUse == true)
             {
@@ -211,13 +200,12 @@ public:
         while (1)
         {
             PAGE_ID id = span->_pageId + span->_n;
-            auto ret = _idSpanMap.find(id);
-            if (ret == _idSpanMap.end())
+            Span* nextSpan = _pageMap.get(id);
+            if (nextSpan == nullptr)
             {
                 break;
             }
 
-            Span* nextSpan = ret->second;
             if (nextSpan->_isUse == true)
             {
                 break;
@@ -235,11 +223,15 @@ public:
             _spanPool.Delete(nextSpan);
         }
 
-        // 将合并后的span挂上，并且为了以后方便合并，将前后PAGE_ID加进_idSpanMap
+        // 将合并后的span挂上，并且为了以后方便合并，将前后PAGE_ID加进_pageMap
         _spanLists[span->_n].PushFront(span);
         span->_isUse = false;
-        _idSpanMap[span->_pageId] = span;
-        _idSpanMap[span->_pageId + span->_n - 1] = span;
+        // 统一清理：包含刚被吸收的邻居区间（它们一定是新范围的子集），
+        // 然后只把首/尾页指向存活下来的这个 Span。
+        // 这样页缓存里的"内部页"一律是 nullptr，不会有指向已回收 Span 的悬垂条目。
+        _pageMap.clearRange(span->_pageId, span->_n);
+        _pageMap.set(span->_pageId, span);
+        _pageMap.set(span->_pageId + span->_n - 1, span);
     }
 };
 

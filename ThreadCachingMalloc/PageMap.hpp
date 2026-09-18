@@ -52,6 +52,7 @@ public:
     struct Leaf { std::atomic<Span*> values[LEAF_LENGTH]; };
 
     PageMap() : _nodes(0), _top(NewTop()) {}
+    PageMap(const PageMap&) = delete;
 
     Span* get(PAGE_ID k) const
     {
