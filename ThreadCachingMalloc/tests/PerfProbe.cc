@@ -1,9 +1,9 @@
 // PerfProbe.cc —— 页映射替换前后的性能探针（独立 main）
 //
 // 这是 Task 7 用来产出 README「页映射替换前后」那张表的探针，固化进仓库以便复现。
-// 用法（在 ThreadCachingMalloc 目录下）：
-//   g++ -O2 -o _perf_radix PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1）
-//   g++ -O2 -o _perf_hash  PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
+// 用法（在 ThreadCachingMalloc 目录下；本文件用 ../ 引用库头文件，故从任何目录编译都一样）：
+//   g++ -O2 -o _perf_radix tests/PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1）
+//   g++ -O2 -o _perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
 //   ./_perf_radix ; ./_perf_hash
 //
 // 口径：每线程先预热 10 万次申请/释放，再分别计时一轮 10 万次申请与一轮 10 万次释放；
@@ -13,7 +13,7 @@
 // 注意：数字与本机强相关。README 的表来自 i9-12900HX，换机器绝对值会有差异
 // （终审独立复现时对照侧区间低 14–24%，但方向与 ~5× 的量级一致）。
 
-#include "ConcurrentAlloc.hpp"
+#include "../ConcurrentAlloc.hpp"
 
 #include <atomic>
 #include <chrono>

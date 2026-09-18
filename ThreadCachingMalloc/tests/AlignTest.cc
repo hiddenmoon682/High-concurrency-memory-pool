@@ -1,7 +1,7 @@
 // AlignTest.cc —— 尺寸分类第一档对齐粒度（8B -> 16B）的行为测试
 //
 // 编译运行：
-//   g++ -o align_test AlignTest.cc -std=c++11
+//   g++ -o align_test tests/AlignTest.cc -std=c++11
 //   ./align_test          退出码 0 表示全部通过
 //
 // 覆盖的不变量：
@@ -20,7 +20,7 @@
 //   T7  MAX_BYTES 边界（对齐后正好 256KB）可申请可释放 —— 必须放在最后，
 //       因为修复前它会触发 assert 直接 abort，后面的用例就没机会跑了。
 
-#include "ConcurrentAlloc.hpp"
+#include "../ConcurrentAlloc.hpp"
 
 #include <algorithm>
 #include <cassert>     // 直接包含：T10b 的分支自证 assert 不依赖 Common.hpp 的传递包含

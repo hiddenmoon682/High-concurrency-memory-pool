@@ -48,8 +48,8 @@
 | 基数树 | `PageMap.hpp` | 页号→Span 映射：三层基数树（Top/Mid/Leaf，节点惰性分配），读侧免锁（radix tree） |
 | 定长对象池 | `ObjectPool.hpp` | 大块内存 + 空闲链表复用，定位 `new` 构造；用于分配内部对象（Span、ThreadCache） |
 | 公开接口 | `ConcurrentAlloc.hpp` | `ConcurrentAlloc(size)` / `ConcurrentFree(ptr)`，TLS 惰性初始化 |
-| 单元测试 | `UnitTest.hpp` | `TLStest` 等多线程申请/释放正确性用例（`main.cc` 入口） |
-| 基准测试 | `BenchMark.cc` | 多线程并发下与系统 `malloc` 的耗时对比 |
+| 单元测试 | `tests/UnitTest.hpp` | `TLStest` 等多线程申请/释放正确性用例（`tests/main.cc` 入口） |
+| 基准测试 | `tests/BenchMark.cc` | 多线程并发下与系统 `malloc` 的耗时对比 |
 
 ### 关键设计点
 
@@ -81,7 +81,8 @@
 
 ## 三、构建与运行
 
-环境：g++（C++11），无需第三方依赖。
+环境：g++（C++11），无需第三方依赖。所有测试程序都在 `ThreadCachingMalloc/tests/` 下，
+它们用 `#include "../xxx.hpp"` 引用库头文件，因此**从哪个目录编译都一样**（下面统一在 `ThreadCachingMalloc/` 下执行）。
 
 ```bash
 # 高并发内存池 —— 性能基准（对比系统 malloc）
@@ -90,24 +91,24 @@ make                  # 产物 tcmalloc
 ./tcmalloc
 
 # 高并发内存池 —— 单元测试（TLStest）
-g++ -o gtcmalloc main.cc -std=c++11
+g++ -o gtcmalloc tests/main.cc -std=c++11
 ./gtcmalloc
 
 # 高并发内存池 —— 对齐与桶号一致性测试
-g++ -o align_test AlignTest.cc -std=c++11
+g++ -o align_test tests/AlignTest.cc -std=c++11
 ./align_test          # 退出码 0 表示全部通过
 
 # 页映射单元测试（两种实现各跑一遍）
-g++ -o page_map_test PageMapTest.cc -std=c++11 && ./page_map_test
-g++ -o page_map_test_hash PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./page_map_test_hash
+g++ -o page_map_test tests/PageMapTest.cc -std=c++11 && ./page_map_test
+g++ -o page_map_test_hash tests/PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./page_map_test_hash
 
 # 多线程混合尺寸压力测试（两种实现各跑一遍）
-g++ -O2 -o stress_test StressTest.cc -std=c++11 && ./stress_test
-g++ -O2 -o stress_test_hash StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./stress_test_hash
+g++ -O2 -o stress_test tests/StressTest.cc -std=c++11 && ./stress_test
+g++ -O2 -o stress_test_hash tests/StressTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./stress_test_hash
 
 # 页映射性能探针（README 那张表的来源，两种实现各跑一遍）
-g++ -O2 -o _perf_radix PerfProbe.cc -std=c++11 && ./_perf_radix
-g++ -O2 -o _perf_hash  PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./_perf_hash
+g++ -O2 -o _perf_radix tests/PerfProbe.cc -std=c++11 && ./_perf_radix
+g++ -O2 -o _perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./_perf_hash
 
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
@@ -115,7 +116,7 @@ make                  # 产物 Objectpool
 ./Objectpool
 ```
 
-基准测试参数（BenchMark.cc）：4 线程、每轮 1000 次 16 字节申请+释放、共 10 轮，
+基准测试参数（`tests/BenchMark.cc`）：4 线程、每轮 1000 次 16 字节申请+释放、共 10 轮，
 输出内存池与 `malloc` 各自的耗时（ms）。注意它的 `malloc` 一侧**恒打印 0 ms**——
 不是"没有耗时"，而是 `clock()` 的分辨率（Windows 上约 1 ms）大于该侧 40000 次
 操作的总耗时，量不出来；`-O2` 与否都一样（实测池侧 4–9 ms、malloc 侧 0 ms）。
@@ -123,13 +124,13 @@ make                  # 产物 Objectpool
 
 ### 页映射替换前后（`steady_clock`，每线程 10 万次，16 字节）
 
-测量方式：仓库内的探针 `ThreadCachingMalloc/PerfProbe.cc`（每线程先预热 10 万次申请/释放，
+测量方式：仓库内的探针 `ThreadCachingMalloc/tests/PerfProbe.cc`（每线程先预热 10 万次申请/释放，
 再计时一轮 10 万次申请与一轮 10 万次释放），取"线程内平均延迟"（各线程耗时之和 ÷ 总操作数），
-单位 ns/op，`g++ -O2 -std=c++11`。复现命令：
+单位 ns/op，`g++ -O2 -std=c++11`。复现命令（在 `ThreadCachingMalloc/` 下执行）：
 
 ```
-g++ -O2 -o _perf_radix PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1，不加 -D）
-g++ -O2 -o _perf_hash  PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
+g++ -O2 -o _perf_radix tests/PerfProbe.cc -std=c++11                          # 基数树（默认 mode 1，不加 -D）
+g++ -O2 -o _perf_hash  tests/PerfProbe.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 # 对照 unordered_map
 ./_perf_radix ; ./_perf_hash
 ```
 
@@ -164,13 +165,15 @@ alloc 一侧同样受益，但只体现在**多线程**：2 线程 17.6→12.4�
 │   ├── PageMap.hpp               #   基数树页号映射（三层，节点惰性分配）
 │   ├── ObjectPool.hpp            #   定长对象池（内部对象分配）
 │   ├── Common.hpp                #   公共定义（Span/SizeClass/FreeList）
-│   ├── UnitTest.hpp              #   单元测试
-│   ├── PageMapTest.cc            #   页映射单元测试（独立 main）
-│   ├── AlignTest.cc              #   不变量与回归测试（对齐/桶号/span/大块合并/边界）
-│   ├── StressTest.cc             #   多线程混合尺寸压力测试（独立 main）
-│   ├── PerfProbe.cc              #   页映射性能探针（README 那几张表的来源）
-│   ├── BenchMark.cc              #   性能基准（vs malloc）
-│   ├── main.cc                   #   测试入口
+│   ├── Makefile                  #   构建基准程序（make -> tcmalloc）
+│   ├── tests/                    #   测试程序（各自独立 main，用 ../ 引用库头文件）
+│   │   ├── main.cc               #     测试入口（TLStest）
+│   │   ├── UnitTest.hpp          #     单元测试用例
+│   │   ├── PageMapTest.cc        #     页映射单元测试
+│   │   ├── AlignTest.cc          #     不变量与回归测试（对齐/桶号/span/大块合并/边界）
+│   │   ├── StressTest.cc         #     多线程混合尺寸压力测试
+│   │   ├── PerfProbe.cc          #     页映射性能探针（README 那几张表的来源）
+│   │   └── BenchMark.cc          #     性能基准（vs malloc）
 │   └── Log/                      #   日志模块
 └── Fixed_length_memory_pool/     # 定长内存池（前置练习）
     ├── Objectpool.hpp            #   ObjectPool<T> 模板
@@ -190,13 +193,13 @@ alloc 一侧同样受益，但只体现在**多线程**：2 线程 17.6→12.4�
    `ConcurrentAlloc` 的小对象分支里惰性初始化。于是"一个只释放、从不分配"的线程
    首次调用 `ConcurrentFree` 时 `pTLSThreadCache` 仍是 `nullptr`：
    debug 构建下 `assert(pTLSThreadCache)` 直接 abort，release 构建下空指针解引用崩溃。
-   **`StressTest.cc` 的消费者线程里有 `ConcurrentFree(ConcurrentAlloc(16));` 这行预热，
+   **`tests/StressTest.cc` 的消费者线程里有 `ConcurrentFree(ConcurrentAlloc(16));` 这行预热，
    它规避了该缺陷，同时也把它掩盖了**——去掉那行，消费者线程一启动就会崩。
    真正的修法在 `ConcurrentFree`：小对象分支也要做与 `ConcurrentAlloc` 相同的惰性初始化
    （`if (pTLSThreadCache == nullptr) { ... tcPool.New(); }`），而不是依赖调用方预热。
-2. **`BenchMark.cc:86` 有一个 `-Wunused-variable` 警告。**
+2. **`tests/BenchMark.cc:86` 有一个 `-Wunused-variable` 警告。**
    `if (i == 550) { int x = 0; }` 里的 `x` 声明后从未使用。属既有问题、与页映射替换无关；
-   一行 `(void)x;` 即可消除。带 `-Wall -Wextra` 构建 `BenchMark.cc` 时会出现这一条警告
+   一行 `(void)x;` 即可消除。带 `-Wall -Wextra` 构建 `tests/BenchMark.cc` 时会出现这一条警告
    （其余测试程序零警告）。
 3. **页映射节点内存永不回收（刻意设计）。**
    `PageMap` 的 Top/Mid/Leaf 节点按需分配，但**从不释放**：地址空间用过的页号区间会
