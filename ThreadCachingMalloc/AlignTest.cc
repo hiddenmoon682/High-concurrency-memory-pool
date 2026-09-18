@@ -445,11 +445,12 @@ static void TestSpanTailNoOverrun()
 //   ② 被误合并的活块还会被 _spanPool.Delete 回收，成为 use-after-free。
 // 校验范围：① 存活块（v 的奇数号）花纹完好；② 存活块与新建块（w）地址不重叠；
 //   ③ w 块自身花纹完好、w 块之间互不重叠；
-//   ④ **页映射内部条目一致性**（PageCache::DebugCheckPageMap，仅 debug 构建真实生效）；
-//   ⑤ 刚释放的 >1MB 块的首页已无映射（DebugIsPageMapped）——那条"直接还给系统"的分支
-//      原本只映射首页，释放时必须把这一页清掉，否则残留悬垂条目。
-// ④⑤ 是"清理陈旧映射"这条设计目标唯二的可证伪覆盖：删掉 ReleaseSpanToPageCache 里
-// 任意一处 clearRange，本用例都会 FAIL（变异证据见 task-8 报告）。
+//   ④ **页映射内部条目一致性**（PageCache::DebugCheckPageMap，仅 debug 构建真实生效）。
+// 本用例的 SZ 是 300000 字节（37 页），**不**走 >128 页的"直接还给系统"分支，
+// 所以它不覆盖"已释放大块首页仍留在映射里"那一类缺陷 —— 那是 **T10b** 的职责
+// （T10b 用 DebugIsPageMapped 逐个断言，见其函数注释 ⑤）。
+// 变异覆盖分工：删掉合并收尾处的 clearRange -> 本用例与 T10 的桶内一致性遍历 FAIL；
+// 删掉 >128 页分支的 clearRange -> 由 **T10b** 的首页断言抓到（变异证据见 task-8 报告）。
 static void TestLargeBlockAdjacentFree()
 {
     const size_t SZ = 300000;   // > 256KB 且 37 页 <= 128，走的正是会崩的那条路
@@ -663,6 +664,13 @@ static void TestStaleMapAfterMerge()
 // 发给两个新块"会静默通过）。
 // 注意只对"存活块 vs 新块"和"新块之间"做重叠判定：已释放的块被下一次同尺寸
 // 申请按原地址复用是 SystemFree 的正常行为，不是缺陷。
+// 校验范围另含两条页映射检查（与 T9/T10 的 ④ 对应，见各自的函数注释）：
+//   ④ 调用 PageCache::DebugCheckPageMap()：桶内驻留的 Span 只应有首/尾页映射、
+//      内部页为 nullptr（这条检查在 release 构建下返回恒真，不做实际遍历）；
+//   ⑤ 逐个断言"刚释放的 >1MB 块的首页已无映射"（DebugIsPageMapped）—— 这类 span
+//      只建立过首页这一条映射，删掉本分支的 clearRange 就会留下悬垂条目。
+//      ⑤ 是这条"直接还给系统"分支唯一可失败的保护：这类 span 从不进 _spanLists，
+//      ④ 的桶内遍历看不到它们（变异证据见 task-8 报告：删分支 clearRange -> 残留映射 3 个）。
 static void TestStaleMapLargeSpan()
 {
     const size_t SZ = 1200000;   // > 1MB，对齐后 1204224 字节 = 147 页 > 128 页
