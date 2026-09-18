@@ -20,7 +20,7 @@
    │
    ▼
 ┌─────────────┐   无锁（TLS），大多数分配/释放在这层完成
-│ ThreadCache │   每线程一份哈希桶：208 个自由链表（FreeList）
+│ ThreadCache │   每线程一份哈希桶：200 个自由链表（FreeList）
 └──────┬──────┘
        │ 批量获取 / 批量归还（慢启动调节）
        ▼
@@ -41,7 +41,7 @@
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| 公共定义 | `Common.hpp` | 常量（`MAX_BYTES=256KB`、`NFREELIST=208`、页大小 8KB）、`FreeList`、`Span`/`SpanList`、`SizeClass` 对齐与桶号映射、`SystemAlloc`/`SystemFree` |
+| 公共定义 | `Common.hpp` | 常量（`MAX_BYTES=256KB`、`NFREELIST=200`、页大小 8KB）、`FreeList`、`Span`/`SpanList`、`SizeClass` 对齐与桶号映射、`SystemAlloc`/`SystemFree` |
 | 线程缓存 | `ThreadCache.hpp` | 每线程 TLS 哈希桶；桶空时向中心缓存**批量**申请（慢启动反馈调节，逐步增大批次）；桶过长时批量归还 |
 | 中心缓存 | `CentralCache.hpp` | 桶锁粒度并发；管理切好的小块内存（Span 内自由链表），`FetchRangeObj`/`ReleaseListToSpans` |
 | 页缓存 | `PageCache.hpp` | 单例；页级 Span 双向链表桶 + **页号→Span 映射**（回收时反查），大 span 按需切分，相邻页合并归还 |
@@ -53,9 +53,12 @@
 
 ### 关键设计点
 
-- **分段对齐，内碎片 ≤ 10%**：`[1,128]` 按 8B、`[128,1K]` 16B、`[1K,8K]` 128B、`[8K,64K]` 1024B、`[64K,256K]` 8KB 对齐；
+- **分段对齐**：`[1,128]` 按 16B、`[128,1K]` 16B、`[1K,8K]` 128B、`[8K,64K]` 1024B、`[64K,256K]` 8KB 对齐；
+  第一档取 16B 是为了满足 x64 上 `malloc`/`new` 的 `max_align_t`(16 字节) 对齐契约——若用 8B 粒度，块大小会出现 8 的奇数倍（24、40、56…），
+  「span 基址(8KB 对齐) + k×块大小」就只有一半的块能对齐到 16，SSE 的 `movaps` 与 C++17 扩展对齐 `new` 会直接崩；
+  代价是最小桶由 16 个减到 8 个、小对象内碎片上限由 7 字节涨到 15 字节（相对区间上界 16/128 = 12.5%，申请 1~8 字节时占用翻倍）；
 - **慢启动批量调节**：线程缓存每次向中心缓存申请一批（`NumMoveSize` 计算），越常用批次越大（`MaxSize` 递增），减少跨层交互；
-- **大块直通**：申请 ≥ 256KB 时跳过线程/中心缓存，直接按页向 PageCache/系统申请；
+- **大块直通**：申请 > 256KB 时跳过线程/中心缓存，直接按页向 PageCache/系统申请（正好 256KB 仍走尺寸档，是最后一个桶）；
 - **回收与合并**：释放时经页号→Span 映射反查归属，PageCache 将相邻空闲页合并成大 span（内存回收模块）；
 - **平台兼容**：Windows 走 `VirtualAlloc`/`VirtualFree`，Linux/macOS 走系统分配。
 
@@ -83,6 +86,10 @@ make                  # 产物 tcmalloc
 g++ -o gtcmalloc main.cc -std=c++11
 ./gtcmalloc
 
+# 高并发内存池 —— 对齐与桶号一致性测试
+g++ -o align_test AlignTest.cc -std=c++11
+./align_test          # 退出码 0 表示全部通过
+
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
 make                  # 产物 Objectpool
@@ -106,6 +113,7 @@ make                  # 产物 Objectpool
 │   ├── ObjectPool.hpp            #   定长对象池（内部对象分配）
 │   ├── Common.hpp                #   公共定义（Span/SizeClass/FreeList）
 │   ├── UnitTest.hpp              #   单元测试
+│   ├── AlignTest.cc              #   对齐 / 桶号 / 边界不变量测试（独立 main）
 │   ├── BenchMark.cc              #   性能基准（vs malloc）
 │   ├── main.cc                   #   测试入口
 │   └── Log/                      #   日志模块

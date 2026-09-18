@@ -15,7 +15,9 @@ public:
     // 申请内存
     void* Allocate(size_t size)
     {
-        assert(size < MAX_BYTES);
+        // 必须是 <=：ConcurrentAlloc 只在 size > MAX_BYTES 时才走大块直通路径，
+        // 所以 size == MAX_BYTES（对齐后正好 256KB）依然会走到这里，属于最后一个尺寸档（桶 199）。
+        assert(size <= MAX_BYTES);
         // 计算申请的内存在对齐后，实际要申请的大小
         size_t alignSize = SizeClass::RoundUp(size);
         // 计算下标（位于哪个哈希桶
@@ -35,7 +37,8 @@ public:
     void Deallocate(void* ptr, size_t size)
     {
         assert(ptr);
-        assert(size < MAX_BYTES);
+        // 与 Allocate 同理：对齐后正好 256KB 的块会以 size == MAX_BYTES 传进来
+        assert(size <= MAX_BYTES);
 
         // 计算在哪个桶，然后插到桶里去
         size_t index = SizeClass::Index(size);
