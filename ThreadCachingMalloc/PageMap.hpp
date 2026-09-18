@@ -30,7 +30,14 @@
 //   * set() / clearRange() 必须由调用方持有 PageCache::_pageMtx。
 //   * 不变量：某页的映射只在这块内存尚未交给调用者时才可能改变；
 //     一旦交出去，在该内存活着期间映射绝不再改。因此免锁读是安全的。
+//     这条不变量**只覆盖"页 → Span"映射本身**：Span 的其余字段（_objSize、
+//     _isUse 等）是在映射发布**之后**才写的，它们对读者可见靠的不是这里的
+//     release/acquire，而是"指针交接"这件事本身建立的同步——谁拿到了那个
+//     指针，谁就看到交出者在交出之前的所有写。所以不要把本契约读成
+//     "整个 Span 都不可变"。
 //   * 写用 release、读用 acquire：x86-64 上都是普通 MOV，不产生额外指令。
+//     （例外是 clearRange 的内部读：它在 _pageMtx 临界区内、属写侧，
+//     与 set() 的 release 写同处一个临界区，用 relaxed 即可。）
 class PageMap
 {
 public:
@@ -170,6 +177,11 @@ public:
 
     void set(PAGE_ID k, Span* v)
     {
+        // 与基数树实现保持一致的越界防御。35 是基数树那侧 BITS 的字面量：
+        // 2^35 页 * 8KB = 256TB，已在合法页号范围之外。mode 0 下没有 BITS 可用
+        // （那组常量只在 #if 分支里），所以这里写字面量并说明来历。
+        // 注：PAGE_ID 最大 64 位无符号，移位量 35 合法且不回绕，断言是有效的。
+        assert((k >> 35) == 0);
         std::lock_guard<std::mutex> lock(_mtx);
         _map[k] = v;
     }
@@ -177,7 +189,17 @@ public:
     void clearRange(PAGE_ID start, size_t n)
     {
         std::lock_guard<std::mutex> lock(_mtx);
-        for (size_t i = 0; i < n; ++i) _map.erase(start + i);
+        // 同基数树实现：start + i 越过 2^35 页号边界时跳过。
+        // 这里以**完整页号**为键，回绕出的 2^35+k 与任何范围内页号都是不同的键，
+        // 所以这条跳过语句不改变可观测行为（实测见 task-7-report.md）。
+        // 它保证的是语义确定：越界页不会被当成"已清理"，两种实现在越界区间上行为一致。
+        // 35 的来历见 set() 的注释。
+        for (size_t i = 0; i < n; ++i)
+        {
+            const PAGE_ID k = start + i;
+            if ((k >> 35) != 0) continue;
+            _map.erase(k);
+        }
     }
 
     // 对照实现里没有"节点"概念，返回当前映射条目数

@@ -12,7 +12,7 @@
 //   T5  桶号在 [0, NFREELIST) 内，且最大尺寸正好落在最后一个桶；
 //   T6  真实分配的地址 16 字节对齐，且块之间互不覆盖（canary 花纹校验）；
 //   T8  span 末块不得越出 span（活块间距检测 + 按整块大小写入花纹校验）；
-//   T9  大块（>256KB）相邻分配/释放：释放后的存活块不得被误合并、被覆盖；
+//   T9  大块（>256KB）相邻分配/释放：存活块不得被误合并、被覆盖；复用块花纹完好且互不重叠；
 //   T10 合并回收后存活块不得被覆盖、不得与新块重叠（不校验映射内部条目，见函数注释）；
 //   T10b >1MB（>128 页）的"直接还给系统"释放分支下，存活块同样不得被覆盖/被新块重叠；
 //   T7  MAX_BYTES 边界（对齐后正好 256KB）可申请可释放 —— 必须放在最后，
@@ -426,6 +426,8 @@ static void TestSpanTailNoOverrun()
 //   ① 合并会对一个从未挂进链表的 Span 调 Erase()，它的 _next/_prev 是 nullptr，
 //      直接空指针崩溃（修复前本用例会以 0xC0000005 结束）；
 //   ② 被误合并的活块还会被 _spanPool.Delete 回收，成为 use-after-free。
+// 校验范围（**不含**映射内部条目）：① 存活块（v 的奇数号）花纹完好且与复用块不重叠；
+// ② 复用块（w）自身花纹完好、且 w 块之间互不重叠 —— 与 T10/T10b 的判据一致。
 static void TestLargeBlockAdjacentFree()
 {
     const size_t SZ = 300000;   // > 256KB 且 37 页 <= 128，走的正是会崩的那条路
@@ -457,8 +459,14 @@ static void TestLargeBlockAdjacentFree()
         memset(reinterpret_cast<void*>(w[i]), 0x5C, SZ);
     }
 
+    // 与 T10/T10b 一致：存活块与新块分开计数，并各自回读花纹。
+    // 少了"新块自身回读 + 新块之间重叠检查"这两项，
+    // "同一次分配把同一块发给两个新块"这类缺陷会静默通过。
+    size_t corrupted = 0;      // 存活块（v 的奇数号）花纹异常数
+    size_t corruptedNew = 0;   // 新块（w）花纹异常数
+    size_t overlapped = 0;     // 重叠对数
+
     // 存活块（奇数号）花纹必须完好
-    size_t corrupted = 0;
     for (size_t i = 1; i < N; i += 2)
     {
         const unsigned char want = (unsigned char)(0xA0 + i);
@@ -472,12 +480,7 @@ static void TestLargeBlockAdjacentFree()
                 break;
             }
         }
-    }
-
-    // 存活块与"释放后重新申请"的块不能重叠
-    size_t overlapped = 0;
-    for (size_t i = 1; i < N; i += 2)
-    {
+        // 存活块与"释放后重新申请"的块不能重叠
         for (size_t j = 0; j < w.size(); ++j)
         {
             if (v[i] < w[j] + SZ && w[j] < v[i] + SZ)
@@ -489,15 +492,42 @@ static void TestLargeBlockAdjacentFree()
         }
     }
 
-    if (corrupted == 0 && overlapped == 0)
+    // 新块自身：释放前逐个回读花纹（期望 0x5C），并做"新块之间"的重叠检查
+    for (size_t i = 0; i < w.size(); ++i)
+    {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(w[i]);
+        for (size_t b = 0; b < SZ; ++b)
+        {
+            if (p[b] != 0x5C)
+            {
+                ++corruptedNew;
+                printf("        复用块[%zu] 偏移 %zu 花纹被覆盖（0x%02X != 0x5C）\n", i, b, p[b]);
+                break;
+            }
+        }
+        for (size_t j = i + 1; j < w.size(); ++j)
+        {
+            if (w[i] < w[j] + SZ && w[j] < w[i] + SZ)
+            {
+                ++overlapped;
+                printf("        复用块[%zu] @0x%llx 与复用块[%zu] @0x%llx 重叠\n",
+                       i, (unsigned long long)w[i], j, (unsigned long long)w[j]);
+            }
+        }
+    }
+
+    for (size_t i = 0; i < w.size(); ++i) ConcurrentFree(reinterpret_cast<void*>(w[i]));
+
+    if (corrupted == 0 && corruptedNew == 0 && overlapped == 0)
     {
         ++g_passed;
-        printf("  PASS  T9  大块相邻释放：存活块未被覆盖/未被误合并\n");
+        printf("  PASS  T9  大块相邻释放：存活块未被覆盖/未被误合并；复用块花纹完好、互不重叠\n");
     }
     else
     {
         ++g_failed;
-        printf("  FAIL  T9  大块相邻释放：%zu 个存活块被覆盖，%zu 对重叠\n", corrupted, overlapped);
+        printf("  FAIL  T9  大块相邻释放：存活块被覆盖 %zu 个，复用块花纹异常 %zu 个，重叠 %zu 对\n",
+               corrupted, corruptedNew, overlapped);
     }
 }
 

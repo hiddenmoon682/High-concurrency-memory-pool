@@ -54,9 +54,11 @@ static void ConcurrentFree(void* ptr)
     if (size > MAX_BYTES)
     {
         // 释放大块同样要进 PageCache 的临界区：ReleaseSpanToPageCache 会改 _spanLists、
-        // _idSpanMap 和 _spanPool 这些全局状态。小对象路径（CentralCache::ReleaseListToSpans）
+        // _pageMap 和 _spanPool 这些全局状态。小对象路径（CentralCache::ReleaseListToSpans）
         // 也是先拿 _pageMtx 再调用它，这里原先漏了锁，多线程下会与 NewSpan 并发读写
-        // _idSpanMap。这里不持有桶锁，不会与上面的加锁顺序冲突。
+        // _pageMap。这里不持有桶锁，不会与上面的加锁顺序冲突。
+        // 注意"免锁"只针对读侧：上面的 MapObjectToSpan（_pageMap.get）不拿任何锁，
+        // 写侧的 NewSpan/ReleaseSpanToPageCache 仍然必须持 _pageMtx。
         PageCache::GetInstance()->_pageMtx.lock();
         PageCache::GetInstance()->ReleaseSpanToPageCache(span);
         PageCache::GetInstance()->_pageMtx.unlock();

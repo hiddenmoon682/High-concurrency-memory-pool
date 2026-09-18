@@ -28,7 +28,8 @@ private:
     //   这个按"页数"分桶（129 个）。另外这里整个类共用一把 _pageMtx，
     //   所以 SpanList 自带的 _mtx 在 PageCache 中并不使用（它是给 CentralCache 当桶锁的）。
     SpanList _spanLists[NPAGES];        // 哈希桶：下标 = 页数
-    PageMap _pageMap;                   // 页号 -> Span 的映射（免锁读，见 PageMap.hpp 的并发契约）
+    PageMap _pageMap;                   // 页号 -> Span 的映射（免锁读，见 PageMap.hpp 的并发契约；
+                                        // 基数树模式免锁；对照模式内部加锁）
     ObjectPool<Span> _spanPool;
 private:
     PageCache()
@@ -132,6 +133,7 @@ public:
 
     // 免锁读：free 路径不再获取 _pageMtx（这正是本次替换的目的）。
     // 安全性来自 PageMap.hpp 里写明的不变量：活跃内存对应的页映射不会再变。
+    // （基数树模式免锁；对照模式内部加锁）
     Span* MapObjectToSpan(void* obj)
     {
         PAGE_ID id = (PAGE_ID)obj >> PAGE_SHIFT;

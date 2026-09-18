@@ -62,41 +62,93 @@ int main()
         Check(m.get(101) == nullptr, "T10 clearRange 覆盖起点");
     }
 
-#if TC_USE_RADIX_PAGEMAP
+    // (c) n == 0：对已映射页调用 clearRange(x, 0) 必须什么都不做
     {
         PageMap m;
         Span a;
-        const size_t before = m.nodesAllocated();
-        m.clearRange(5000, 4096);            // 从未 set 过的区间
-        Check(m.nodesAllocated() == before, "T11 clearRange 不分配节点");
+        m.set(7000, &a);
+        m.clearRange(7000, 0);
+        Check(m.get(7000) == &a, "T11 clearRange(x, 0) 不动已映射页");
+        m.clearRange(7000, 0);
+        Check(m.get(7000) == &a, "T12 clearRange(x, 0) 重复调用仍不动映射");
+    }
+
+#if TC_USE_RADIX_PAGEMAP
+    // (b) clearRange 跨叶 / 跨 Mid —— 本任务交付函数的核心路径
+    {
+        PageMap m;
+        Span a;
+        Span b;
+        // 跨叶：2047 与 2048 相差 2^11 页（16MB），落进两棵不同的 Leaf
+        m.set(2047, &a);
+        m.set(2048, &b);
+        const size_t before = m.nodesAllocated();   // 基线取在 set 之后：要证明的是 clearRange 不分配
+        m.clearRange(2047, 2);
+        Check(m.get(2047) == nullptr && m.get(2048) == nullptr, "T13 clearRange 跨叶清理两页");
+        Check(m.nodesAllocated() == before, "T14 clearRange 跨叶不分配节点");
+        // 跨 Mid：两页相差 2^23 页（64GB），leaf 下标相同但 Mid 不同
+        const PAGE_ID midBase = (PAGE_ID)1 << SPEC_SHIFT1;
+        m.set(midBase - 1, &a);
+        m.set(midBase, &b);
+        const size_t beforeMid = m.nodesAllocated();
+        m.clearRange(midBase - 1, 2);
+        Check(m.get(midBase - 1) == nullptr && m.get(midBase) == nullptr, "T15 clearRange 跨 Mid 清理两页");
+        Check(m.nodesAllocated() == beforeMid, "T16 clearRange 跨 Mid 不分配节点");
     }
 #endif
 
     {
         PageMap m;
         Span a;
-        // 同叶内两个不同页
+        m.set(100, &a);
+        // 越界区间：start + n 回绕越过 2^35 页号边界，两种实现都必须跳过。
+        // 诚实说明：这是"两种实现行为一致"的检查，**不是**一条能单独证伪 (g) 的
+        // 回归测试 —— 对照实现以完整页号为键，回绕后的 2^35±k 与范围内页号是不同的键，
+        // 实测（见 task-7-report.md）去掉跳过语句后本断言仍然通过。跳过语句的价值在于
+        // 语义确定（不会被误当成"清理了低地址页"）以及与基数树侧对称。
+        m.clearRange(((PAGE_ID)1 << SPEC_BITS) - 1, 3);
+        Check(m.get(100) == &a, "T17 clearRange 越界区间被跳过、不波及范围内条目");
+    }
+
+#if TC_USE_RADIX_PAGEMAP
+    {
+        PageMap m;
+        Span a;
+        const size_t before = m.nodesAllocated();
+        m.clearRange(5000, 4096);            // 从未 set 过的区间
+        Check(m.nodesAllocated() == before, "T18 clearRange 不分配节点");
+    }
+#endif
+
+    // (a) 边界用例：每个边界页用**不同的** Span 对象。
+    // 若某两个边界页混叠到同一槽位（基数树按位的切分写错时就会这样），
+    // 回读到的会是"最后写入的那个 Span"，用同一个 &a 是发现不了的。
+    {
+        PageMap m;
+        Span a;                                          // 同叶内的两个不同页共用
+        Span s0, s1, s2, s3, s4, s5;                     // 六个边界页各自一个
+        const PAGE_ID base = (PAGE_ID)1 << SPEC_LEAF_BITS;   // 2048：跨叶边界（16MB）
+        const PAGE_ID midBase = (PAGE_ID)1 << SPEC_SHIFT1;   // 2^23：跨 Mid 边界（64GB）
+        const PAGE_ID last = ((PAGE_ID)1 << SPEC_BITS) - 1;  // 2^35-1：最大合法页号
+
         m.set(10, &a);
         m.set(11, &a);
-        // 跨叶边界：相差 1<<LEAF_BITS(11) = 2048 页 = 16MB
-        const PAGE_ID base = (PAGE_ID)1 << SPEC_LEAF_BITS;
-        m.set(base - 1, &a);
-        m.set(base, &a);
-        // 跨 Mid 边界：相差 1<<SHIFT1(23) = 64GB
-        const PAGE_ID midBase = (PAGE_ID)1 << SPEC_SHIFT1;
-        m.set(midBase - 1, &a);
-        m.set(midBase, &a);
-        // 边界页号
-        const PAGE_ID last = ((PAGE_ID)1 << SPEC_BITS) - 1;
-        m.set(0, &a);
-        m.set(last, &a);
+        m.set(0, &s0);              // 最小页号；叶下标 0，与 base 同槽位
+        m.set(base - 1, &s1);       // 叶边界前一页；叶下标 2047
+        m.set(base, &s2);           // 叶边界后一页；叶下标 0（与 s0 同槽位，不同的叶）
+        m.set(midBase - 1, &s3);    // Mid 边界前一页
+        m.set(midBase, &s4);        // Mid 边界后一页
+        m.set(last, &s5);           // 最大合法页号
 
-        Check(m.get(10) == &a && m.get(11) == &a, "T12 同叶多页");
-        Check(m.get(base - 1) == &a && m.get(base) == &a, "T13 跨叶边界（16MB）");
-        Check(m.get(midBase - 1) == &a && m.get(midBase) == &a, "T14 跨 Mid 边界（64GB）");
-        Check(m.get(0) == &a, "T15 页号 0");
-        Check(m.get(last) == &a, "T16 最大页号 2^35-1");
-        Check(m.get((PAGE_ID)1 << SPEC_BITS) == nullptr, "T17 越界页号返回 nullptr");
+        Check(m.get(10) == &a && m.get(11) == &a, "T19 同叶多页");
+        Check(m.get(0) == &s0 && m.get(base) == &s2, "T20 叶下标相同的两个边界页各归其主");
+        Check(m.get(base - 1) == &s1, "T21 跨叶边界前一页（16MB）");
+        Check(m.get(base) == &s2, "T22 跨叶边界后一页（16MB）");
+        Check(m.get(midBase - 1) == &s3, "T23 跨 Mid 边界前一页（64GB）");
+        Check(m.get(midBase) == &s4, "T24 跨 Mid 边界后一页（64GB）");
+        Check(m.get(0) == &s0, "T25 页号 0");
+        Check(m.get(last) == &s5, "T26 最大页号 2^35-1");
+        Check(m.get((PAGE_ID)1 << SPEC_BITS) == nullptr, "T27 越界页号返回 nullptr");
     }
 
     printf("\n结果：%d 项通过，%d 项失败\n", g_passed, g_failed);
