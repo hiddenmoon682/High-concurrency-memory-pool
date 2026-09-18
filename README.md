@@ -45,7 +45,7 @@
 | 线程缓存 | `ThreadCache.hpp` | 每线程 TLS 哈希桶；桶空时向中心缓存**批量**申请（慢启动反馈调节，逐步增大批次）；桶过长时批量归还 |
 | 中心缓存 | `CentralCache.hpp` | 桶锁粒度并发；管理切好的小块内存（Span 内自由链表），`FetchRangeObj`/`ReleaseListToSpans` |
 | 页缓存 | `PageCache.hpp` | 单例；页级 Span 双向链表桶 + **页号→Span 映射**（回收时反查），大 span 按需切分，相邻页合并归还 |
-| 基数树 | `PageMap.hpp` | 页号→Span 地址映射的优化实现：单层数组 / 双层 / 三层基数树（radix tree） |
+| 基数树 | `PageMap.hpp` | 页号→Span 映射：三层基数树（Top/Mid/Leaf，节点惰性分配），读侧免锁（radix tree） |
 | 定长对象池 | `ObjectPool.hpp` | 大块内存 + 空闲链表复用，定位 `new` 构造；用于分配内部对象（Span、ThreadCache） |
 | 公开接口 | `ConcurrentAlloc.hpp` | `ConcurrentAlloc(size)` / `ConcurrentFree(ptr)`，TLS 惰性初始化 |
 | 单元测试 | `UnitTest.hpp` | `TLStest` 等多线程申请/释放正确性用例（`main.cc` 入口） |
@@ -90,6 +90,10 @@ g++ -o gtcmalloc main.cc -std=c++11
 g++ -o align_test AlignTest.cc -std=c++11
 ./align_test          # 退出码 0 表示全部通过
 
+# 页映射单元测试（两种实现各跑一遍）
+g++ -o page_map_test PageMapTest.cc -std=c++11 && ./page_map_test
+g++ -o page_map_test_hash PageMapTest.cc -std=c++11 -DTC_USE_RADIX_PAGEMAP=0 && ./page_map_test_hash
+
 # 定长内存池 —— 与 new/delete 性能对比
 cd ../Fixed_length_memory_pool
 make                  # 产物 Objectpool
@@ -109,10 +113,11 @@ make                  # 产物 Objectpool
 │   ├── ThreadCache.hpp           #   线程缓存（哈希桶 + 慢启动）
 │   ├── CentralCache.hpp          #   中心缓存（桶锁）
 │   ├── PageCache.hpp             #   页缓存（单例，span 管理/回收合并）
-│   ├── PageMap.hpp               #   基数树页号映射（1/2/3 层）
+│   ├── PageMap.hpp               #   基数树页号映射（三层，节点惰性分配）
 │   ├── ObjectPool.hpp            #   定长对象池（内部对象分配）
 │   ├── Common.hpp                #   公共定义（Span/SizeClass/FreeList）
 │   ├── UnitTest.hpp              #   单元测试
+│   ├── PageMapTest.cc            #   页映射单元测试（独立 main）
 │   ├── AlignTest.cc              #   不变量与回归测试（对齐/桶号/span/大块合并/边界）
 │   ├── BenchMark.cc              #   性能基准（vs malloc）
 │   ├── main.cc                   #   测试入口
