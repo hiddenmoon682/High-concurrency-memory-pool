@@ -43,3 +43,6 @@
 # 编译产物统一输出目录（bin/ 下全部是可经 make / g++ 重新生成的二进制）
 /ThreadCachingMalloc/bin/
 /Fixed_length_memory_pool/bin/
+
+# 本地设计草稿（规格 / 计划），明确不入库，避免 git add -A 误带
+/docs/
